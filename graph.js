@@ -683,12 +683,6 @@ function maskAuthHeader(value) {
   const params = new URLSearchParams(location.search);
   const epicParam = params.get('epic');
 
-  runBtn.addEventListener('click', () => {
-    const opt = epicSelect.value;
-    if (!opt) { setStatus('Seleziona un Epico', false); return; }
-    loadGraph(opt);
-  });
-
   // Caricamento automatico alla selezione dalla tendina
   epicSelect.addEventListener('change', () => {
     const opt = epicSelect.value;
@@ -717,13 +711,15 @@ function maskAuthHeader(value) {
       const found = epics.find(e => e.key === norm);
       if (found) epicSelect.value = norm;
     }
-    if (epicSelect.value) loadGraph(epicSelect.value); else setStatus('Seleziona un Epico e clicca Carica.', true);
+    if (epicSelect.value) loadGraph(epicSelect.value); else setStatus('Select Epics in Actual Sprint', true);
   } catch (e) {
     console.error(e);
     setStatus('Impossibile caricare gli epici della sprint attiva. Verifica credenziali.', false);
   }
 
   const copyBtn = document.getElementById('copyDebug');
+  const openSettingsBtn = document.getElementById('openSettings');
+  openSettingsBtn?.addEventListener('click', () => chrome.runtime.openOptionsPage());
   copyBtn?.addEventListener('click', async () => {
     const debug = lastApiDebug || { info: 'Nessuna chiamata ancora effettuata.' };
     const text = JSON.stringify(debug, null, 2);
