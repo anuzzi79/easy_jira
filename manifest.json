@@ -1,0 +1,19 @@
+{
+    "manifest_version": 3,
+    "name": "Jira Epic Graph (FacilityGrid)",
+    "version": "1.0.0",
+    "description": "Visualizza l'albero (force graph) di un Epico Jira (FacilityGrid) con figli e sub-task.",
+    "action": {
+      "default_title": "Jira Epic Graph",
+      "default_popup": "popup.html"
+    },
+    "options_page": "options.html",
+    "permissions": ["storage"],
+    "host_permissions": ["https://*.atlassian.net/*"],
+    "icons": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  }
+  

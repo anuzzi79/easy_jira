@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <title>Jira Epic Graph</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="wrap">
+    <h1>Jira Epic Graph</h1>
+    <label for="epicKey">Epic Key</label>
+    <input id="epicKey" type="text" placeholder="FGC-9540 o 9540" />
+    <button id="openGraph">Apri Grafico</button>
+
+    <p class="hint">
+      URL progetto configurabile in <a id="openOptions" href="#">Settings</a> (default: <code>https://facilitygrid.atlassian.net/</code>).<br />
+      Inserisci email + API key.
+    </p>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
