@@ -9,6 +9,8 @@ let lastApiDebug = null;
 
 let width, height, simulation, tooltip;
 
+function normalizeStatusName(s) { return String(s || '').trim().toUpperCase(); }
+
 function getCategoryFromIssueType(issuetypeName) {
   const n = String(issuetypeName || '').toLowerCase();
   if (n.includes('epic')) return 'epic';
@@ -129,7 +131,7 @@ async function fetchActiveSprintEpics(token) {
  * Pagination: nextPageToken (NON più startAt/maxResults tradizionale).
  * Doc ufficiale: /rest/api/3/search/jql (GET/POST) con { jql, fields, maxResults, nextPageToken }. 
  */
-async function jiraSearch(token, jql, fields = ['summary','issuetype','parent','subtasks','issuelinks']) {
+async function jiraSearch(token, jql, fields = ['summary','issuetype','parent','subtasks','issuelinks','status','assignee']) {
   const results = [];
   let nextPageToken = undefined;      // primo giro: assente
   const maxResults = 100;
@@ -281,7 +283,9 @@ async function loadGraph(epicKeyRaw) {
           summary: issue.fields.summary || '',
           type,
           issuetype: issuetypeName,
-          category
+          category,
+          status: normalizeStatusName(issue.fields.status?.name),
+          assignee: (issue.fields.assignee?.displayName || issue.fields.assignee?.name || '').trim()
         });
       } else {
         const n = nodeByKey.get(key);
@@ -601,8 +605,11 @@ function renderForceGraph(nodes, links, epicKey, groups = { hierLinks: [], relLi
     .style('opacity', 0);
 
   node.on('mouseover', (event, d) => {
+    const statusTxt = d.status ? `Status: ${escapeHtml(d.status)}` : '';
+    const assigneeTxt = d.assignee ? `Assignee: ${escapeHtml(d.assignee)}` : '';
+    const extra = [statusTxt, assigneeTxt].filter(Boolean).join('<br>');
     tooltip.style('opacity', 1)
-      .html(`<strong>${d.key}</strong><br>${escapeHtml(d.summary)}<br><em>${escapeHtml(d.issuetype)}</em>`);
+      .html(`<strong>${d.key}</strong><br>${escapeHtml(d.summary)}<br><em>${escapeHtml(d.issuetype)}</em>${extra ? `<br>${extra}` : ''}`);
   }).on('mousemove', (event) => {
     tooltip.style('left', `${event.pageX + 8}px`).style('top', `${event.pageY - 10}px`);
   }).on('mouseout', () => {
