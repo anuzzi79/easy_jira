@@ -15,8 +15,14 @@ function getCategoryFromIssueType(issuetypeName) {
   const n = String(issuetypeName || '').toLowerCase();
   if (n.includes('epic')) return 'epic';
   if (n.includes('story')) return 'story';
+  // IMPORTANTE: Riconosci subtask PRIMA di task (perché "sub-task" contiene "task")
+  // Ma controlla anche che non sia un bug
+  if ((n.includes('sub-task') || n.includes('subtask') || n === 'sub-task' || n === 'subtask') && !n.includes('bug')) {
+    return 'subtask';
+  }
   if (n === 'task' || n.includes(' task')) return 'task';
-  if (n === 'bug' || n.includes('bug')) return 'bug'; // nuovo mapping per bug
+  // Bug deve venire dopo subtask per evitare conflitti
+  if (n === 'bug' || n.includes('bug')) return 'bug';
   return 'other';
 }
 
@@ -269,9 +275,14 @@ async function loadGraph(epicKeyRaw) {
     function pushNode(issue, type) {
       const key = issue.key;
       if (!nodeByKey.has(key)) {
-        const issuetypeName = issue.fields.issuetype?.name || type;
+        const issuetypeObj = issue.fields.issuetype || {};
+        const issuetypeName = issuetypeObj.name || type;
         const lower = String(issuetypeName || '').toLowerCase();
         let category = getCategoryFromIssueType(issuetypeName);
+        // Usa flag Jira locale-agnostico
+        if (issuetypeObj && issuetypeObj.subtask === true) category = 'subtask';
+        // Forza subtask SOLO se type è esplicitamente 'subtask' E non è già bug
+        if (type === 'subtask' && category !== 'bug') category = 'subtask';
         if (lower.includes('mobile') && category === 'task') category = 'mobile_task';
         if (lower.includes('mobile') && category === 'bug') category = 'mobile_bug';
         if (lower.includes('document')) category = 'document';
@@ -290,7 +301,14 @@ async function loadGraph(epicKeyRaw) {
       } else {
         const n = nodeByKey.get(key);
         if (!n.type && type) n.type = type;
-        if (!n.category) n.category = getCategoryFromIssueType(n.issuetype || type);
+        // Preserva bug e mobile_bug esistenti
+        if (n.category === 'bug' || n.category === 'mobile_bug') {
+          // Mantieni bug invariato
+        } else if ((!n.category || n.category === 'other') && (issue.fields.issuetype?.subtask === true || type === 'subtask')) {
+          n.category = 'subtask';
+        } else if (!n.category) {
+          n.category = getCategoryFromIssueType(n.issuetype || type);
+        }
       }
     }
 
@@ -298,11 +316,11 @@ async function loadGraph(epicKeyRaw) {
     pushNode(epic, 'epic');
 
     linkedIssues.forEach(ch => {
-      const isSubtask = ch.fields.parent && ch.fields.parent.key;
-      pushNode(ch, isSubtask ? 'subtask' : 'issue');
+      const isRealSubtask = ch.fields?.issuetype?.subtask === true;
+      pushNode(ch, isRealSubtask ? 'subtask' : 'issue');
     });
 
-    parentIssues.forEach(ch => pushNode(ch, 'issue'));
+    parentIssues.forEach(ch => pushNode(ch, ch.fields?.issuetype?.subtask === true ? 'subtask' : 'issue'));
     allSubtasks.forEach(st => pushNode(st, 'subtask'));
 
     // 7) Archi
@@ -322,9 +340,9 @@ async function loadGraph(epicKeyRaw) {
       }
     });
 
-    // Parent -> subtask
+    // Parent -> subtask (solo per veri subtask)
     [...linkedIssues, ...parentIssues, ...allSubtasks].forEach(issue => {
-      if (issue.fields.parent?.key) {
+      if (issue.fields?.issuetype?.subtask === true && issue.fields?.parent?.key) {
         const pKey = issue.fields.parent.key;
         const linkKey = `${pKey}->${issue.key}`;
         if (nodeByKey.has(pKey) && !linkSet.has(linkKey)) {
@@ -434,6 +452,7 @@ function renderForceGraph(nodes, links, epicKey, groups = { hierLinks: [], relLi
     if (c === 'test') return '#166534';
     if (c === 'mobile_bug') return '#fecaca'; // rosso annacquato
     if (c === 'bug') return '#ef4444';       // rosso standard
+    if (c === 'subtask') return '#b3d9ff';   // celeste sbiadito per subtask
     return '#94a3b8';
   };
 
@@ -460,7 +479,7 @@ function renderForceGraph(nodes, links, epicKey, groups = { hierLinks: [], relLi
     .force('link', d3.forceLink(links)
       .id(d => d.id)
       .distance(l => window.EJ_LAYOUT.linkDistance(l, nodes))
-      .strength(l => window.EJ_LAYOUT.linkStrength(l))
+      .strength(l => window.EJ_LAYOUT.linkStrength(l, nodes))
     )
     .force('charge', d3.forceManyBody().strength(d => window.EJ_LAYOUT.nodeCharge(d)))
     .force('center', d3.forceCenter(width / 2, height / 2))
@@ -548,11 +567,16 @@ function renderForceGraph(nodes, links, epicKey, groups = { hierLinks: [], relLi
     const R = d.id === epicKey ? 10 : 7;
 
     // Base circle
-    g.append('circle')
+    const circle = g.append('circle')
       .attr('r', R)
       .attr('fill', colorByCategory(d.category))
-    .attr('stroke', '#fff')
+      .attr('stroke', '#fff')
       .attr('stroke-width', 1.25);
+    
+    // Opacità ridotta per subtask (celeste trasparente sbiadito)
+    if (d.category === 'subtask') {
+      circle.attr('fill-opacity', 0.5);
+    }
 
     // Overlay per tipo
     if (d.category === 'task' || d.category === 'bug' || d.category === 'mobile_bug') {
