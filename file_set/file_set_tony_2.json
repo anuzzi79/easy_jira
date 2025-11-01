@@ -1,0 +1,20 @@
+{
+  "base_dir": "C:/Users/Antonio Nuzzi/EasyJira",
+  "files": [
+    "ISTRUZIONI.md",
+    "appmap.log",
+    "graph.html",
+    "graph.js",
+    "icons\\icon128.png",
+    "icons\\icon16.png",
+    "icons\\icon48.png",
+    "layout.js",
+    "manifest.json",
+    "options.css",
+    "options.html",
+    "options.js",
+    "popup.css",
+    "popup.html",
+    "popup.js"
+  ]
+}

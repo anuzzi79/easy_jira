@@ -15,13 +15,7 @@ function getCategoryFromIssueType(issuetypeName) {
   const n = String(issuetypeName || '').toLowerCase();
   if (n.includes('epic')) return 'epic';
   if (n.includes('story')) return 'story';
-  // IMPORTANTE: Riconosci subtask PRIMA di task (perché "sub-task" contiene "task")
-  // Ma controlla anche che non sia un bug
-  if ((n.includes('sub-task') || n.includes('subtask') || n === 'sub-task' || n === 'subtask') && !n.includes('bug')) {
-    return 'subtask';
-  }
   if (n === 'task' || n.includes(' task')) return 'task';
-  // Bug deve venire dopo subtask per evitare conflitti
   if (n === 'bug' || n.includes('bug')) return 'bug';
   return 'other';
 }
@@ -36,6 +30,12 @@ function normalizeEpicKey(k) {
   k = k.trim().toUpperCase();
   if (/^\d+$/.test(k)) return `FGC-${k}`;
   return k;
+}
+
+// ==== NEW: helper per recuperare la OpenAI API Key (per uso futuro) ====
+async function getAiKey() {
+  const { openAiApiKey } = await chrome.storage.sync.get(['openAiApiKey']);
+  return openAiApiKey || '';
 }
 
 async function getCreds() {
@@ -65,7 +65,7 @@ async function jiraCreateIssueLink(token, fromKey, toKey) {
     credentials: 'omit', cache: 'no-store', mode: 'cors'
   });
   if (!res.ok) {
-    const txt = await res.text().catch(()=>'');
+    const txt = await res.text().catch(()=> '');
     throw new Error(`Link Jira fallito (${res.status}): ${txt.slice(0,180)}`);
   }
 }
@@ -80,28 +80,24 @@ async function fetchXrayExecutionTests(token, execKey) {
     });
     if (!res.ok) return [];
     const data = await res.json();
-    // data is array of objects with { key, status, ... }
     return Array.isArray(data) ? data.map(t => String(t.key)) : [];
   } catch { return []; }
 }
 
 // Ritorna l'elenco degli Epic della sprint attiva del board principale
 async function fetchActiveSprintEpics(token) {
-  // 1) Individua l'id del campo "Epic Link"
   let epicLinkFieldId = null;
   try {
     const res = await fetch(`${JIRA_BASE}/rest/api/3/field`, { headers: { 'Authorization': `Basic ${token}`, 'Accept': 'application/json' } });
     if (res.ok) {
       const fields = await res.json();
       const epicField = fields.find(f => String(f.name).toLowerCase() === 'epic link');
-      if (epicField) epicLinkFieldId = epicField.id; // es. customfield_10014
+      if (epicField) epicLinkFieldId = epicField.id;
     }
   } catch {}
 
-  // 2) Prendi tutte le issue (non-epic) delle sprint aperte
   const childIssues = await jiraSearch(token, `sprint in openSprints() AND issuetype != Epic`, ['summary','issuetype','parent', ...(epicLinkFieldId ? [epicLinkFieldId] : [])]).catch(() => []);
 
-  // 3) Estrai le chiavi degli Epic dai figli
   const epicKeys = new Set();
   for (const it of childIssues) {
     let key = null;
@@ -110,14 +106,12 @@ async function fetchActiveSprintEpics(token) {
       key = typeof v === 'string' ? v : (v?.key || null);
     }
     if (!key && it.fields?.parent?.key) {
-      key = it.fields.parent.key; // Team-managed: epic come parent
+      key = it.fields.parent.key;
     }
     if (key) epicKeys.add(key);
   }
-
   if (epicKeys.size === 0) return [];
 
-  // 4) Recupera i dettagli degli Epic trovati
   const keyList = Array.from(epicKeys);
   const chunks = [];
   for (let i = 0; i < keyList.length; i += 50) chunks.push(keyList.slice(i, i + 50));
@@ -127,19 +121,16 @@ async function fetchActiveSprintEpics(token) {
     const ep = await jiraSearch(token, jql, ['summary','issuetype']).catch(() => []);
     ep.forEach(e => out.push({ key: e.key, summary: e.fields.summary }));
   }
-  // Ordina per key
   out.sort((a,b) => a.key.localeCompare(b.key));
   return out;
 }
 
 /**
- * Jira Cloud v3 (nuovi endpoint): POST /rest/api/3/search/jql
- * Pagination: nextPageToken (NON più startAt/maxResults tradizionale).
- * Doc ufficiale: /rest/api/3/search/jql (GET/POST) con { jql, fields, maxResults, nextPageToken }. 
+ * Jira Cloud v3: POST /rest/api/3/search/jql con nextPageToken
  */
 async function jiraSearch(token, jql, fields = ['summary','issuetype','parent','subtasks','issuelinks','status','assignee']) {
   const results = [];
-  let nextPageToken = undefined;      // primo giro: assente
+  let nextPageToken = undefined;
   const maxResults = 100;
 
   async function tryPostJql(body) {
@@ -157,7 +148,6 @@ async function jiraSearch(token, jql, fields = ['summary','issuetype','parent','
       mode: 'cors'
     });
 
-    // salva diagnostica
     lastApiDebug = {
       url,
       method: 'POST',
@@ -172,14 +162,7 @@ async function jiraSearch(token, jql, fields = ['summary','issuetype','parent','
   }
 
   while (true) {
-    const payload = {
-      jql,
-      fields,
-      maxResults,
-      ...(nextPageToken ? { nextPageToken } : {})
-      // opzionali: expand, properties, fieldsByKeys, reconcileIssues
-    };
-
+    const payload = { jql, fields, maxResults, ...(nextPageToken ? { nextPageToken } : {}) };
     const res = await tryPostJql(payload);
 
     if (!res.ok) {
@@ -195,12 +178,9 @@ async function jiraSearch(token, jql, fields = ['summary','issuetype','parent','
     const data = await res.json();
     const issuesPage = Array.isArray(data.issues) ? data.issues : [];
     results.push(...issuesPage);
-
-    // nuova paginazione: se c'è nextPageToken, continua
     nextPageToken = data.nextPageToken;
     if (!nextPageToken || issuesPage.length === 0) break;
   }
-
   return results;
 }
 
@@ -275,14 +255,9 @@ async function loadGraph(epicKeyRaw) {
     function pushNode(issue, type) {
       const key = issue.key;
       if (!nodeByKey.has(key)) {
-        const issuetypeObj = issue.fields.issuetype || {};
-        const issuetypeName = issuetypeObj.name || type;
+        const issuetypeName = issue.fields.issuetype?.name || type;
         const lower = String(issuetypeName || '').toLowerCase();
         let category = getCategoryFromIssueType(issuetypeName);
-        // Usa flag Jira locale-agnostico
-        if (issuetypeObj && issuetypeObj.subtask === true) category = 'subtask';
-        // Forza subtask SOLO se type è esplicitamente 'subtask' E non è già bug
-        if (type === 'subtask' && category !== 'bug') category = 'subtask';
         if (lower.includes('mobile') && category === 'task') category = 'mobile_task';
         if (lower.includes('mobile') && category === 'bug') category = 'mobile_bug';
         if (lower.includes('document')) category = 'document';
@@ -301,14 +276,7 @@ async function loadGraph(epicKeyRaw) {
       } else {
         const n = nodeByKey.get(key);
         if (!n.type && type) n.type = type;
-        // Preserva bug e mobile_bug esistenti
-        if (n.category === 'bug' || n.category === 'mobile_bug') {
-          // Mantieni bug invariato
-        } else if ((!n.category || n.category === 'other') && (issue.fields.issuetype?.subtask === true || type === 'subtask')) {
-          n.category = 'subtask';
-        } else if (!n.category) {
-          n.category = getCategoryFromIssueType(n.issuetype || type);
-        }
+        if (!n.category) n.category = getCategoryFromIssueType(n.issuetype || type);
       }
     }
 
@@ -316,21 +284,20 @@ async function loadGraph(epicKeyRaw) {
     pushNode(epic, 'epic');
 
     linkedIssues.forEach(ch => {
-      const isRealSubtask = ch.fields?.issuetype?.subtask === true;
-      pushNode(ch, isRealSubtask ? 'subtask' : 'issue');
+      const isSubtask = ch.fields.parent && ch.fields.parent.key;
+      pushNode(ch, isSubtask ? 'subtask' : 'issue');
     });
 
-    parentIssues.forEach(ch => pushNode(ch, ch.fields?.issuetype?.subtask === true ? 'subtask' : 'issue'));
+    parentIssues.forEach(ch => pushNode(ch, 'issue'));
     allSubtasks.forEach(st => pushNode(st, 'subtask'));
 
     // 7) Archi
     const linkSet = new Set();
-    const hierLinks = [];   // gerarchici (epic->child, parent->subtask)
-    const relLinks = [];    // relazioni issue-link tra card dello stesso epic
-    const execLinks = [];   // collegamenti TestExecution -> Test (da summary)
-    const pairSet = new Set(); // per eliminare duplicati direzionali A<->B
+    const hierLinks = [];
+    const relLinks = [];
+    const execLinks = [];
+    const pairSet = new Set();
 
-    // Epic -> figli top-level (tutti, etichettando la categoria del figlio)
     [...linkedIssues, ...parentIssues].forEach(child => {
       const childCat = nodeByKey.get(child.key)?.category;
       const linkKey = `${epicKey}->${child.key}`;
@@ -340,14 +307,12 @@ async function loadGraph(epicKeyRaw) {
       }
     });
 
-    // Parent -> subtask (solo per veri subtask)
     [...linkedIssues, ...parentIssues, ...allSubtasks].forEach(issue => {
-      if (issue.fields?.issuetype?.subtask === true && issue.fields?.parent?.key) {
+      if (issue.fields.parent?.key) {
         const pKey = issue.fields.parent.key;
         const linkKey = `${pKey}->${issue.key}`;
         if (nodeByKey.has(pKey) && !linkSet.has(linkKey)) {
           const childCat = nodeByKey.get(issue.key)?.category;
-          // se parent è epic, annota la categoria del figlio per layout
           const parentCat = nodeByKey.get(pKey)?.category;
           const childMeta = parentCat === 'epic' ? { childCat } : {};
           hierLinks.push({ source: pKey, target: issue.key, kind: 'hier', ...childMeta });
@@ -356,7 +321,6 @@ async function loadGraph(epicKeyRaw) {
       }
     });
 
-    // Issue links (relazioni) tra card del set (includi tutte le relazioni interne all'epico)
     const issueByKey = new Map(issues.map(i => [i.key, i]));
     issueByKey.forEach((src) => {
       const linksArr = src.fields.issuelinks || [];
@@ -365,12 +329,11 @@ async function loadGraph(epicKeyRaw) {
         if (!linked) return;
         const a = src.key;
         const b = linked.key;
-        if (!issueByKey.has(b)) return; // collega solo se l'altro nodo è nel grafo
+        if (!issueByKey.has(b)) return;
         const undirected = a < b ? `${a}--${b}` : `${b}--${a}`;
         if (!pairSet.has(undirected)) {
           const srcCat = nodeByKey.get(a)?.category;
           const dstCat = nodeByKey.get(b)?.category;
-          // Non creare alcun collegamento tra Test Execution ed Epic
           if ((srcCat === 'test_execution' && dstCat === 'epic') ||
               (dstCat === 'test_execution' && srcCat === 'epic')) {
             return;
@@ -381,9 +344,8 @@ async function loadGraph(epicKeyRaw) {
       });
     });
 
-    // Collegamenti forti TestExecution -> Test (estraendo la key dal summary)
     const testExecIssues = issues.filter(i => /test execution/i.test(i.fields.issuetype?.name || ''));
-    const keyRegex = /[A-Z][A-Z0-9]+-\d+/; // es. FGC-9515
+    const keyRegex = /[A-Z][A-Z0-9]+-\d+/;
     const toLoad = new Set();
     const edgesToAdd = [];
     testExecIssues.forEach(execIssue => {
@@ -417,7 +379,6 @@ async function loadGraph(epicKeyRaw) {
     const nodes = Array.from(nodeByKey.values());
     const allLinks = [...hierLinks, ...relLinks, ...execLinks];
 
-    // Filtro finale: rimuovi ogni collegamento tra Test Execution ed Epic
     const catById = new Map(nodes.map(n => [n.id, n.category]));
     const visibleLinks = allLinks.filter(l => {
       const sid = typeof l.source === 'object' ? l.source.id : l.source;
@@ -437,27 +398,30 @@ async function loadGraph(epicKeyRaw) {
 }
 
 function renderForceGraph(nodes, links, epicKey, groups = { hierLinks: [], relLinks: [] }) {
+  const svgNode = svg.node();
   svg.selectAll('*').remove();
 
-  const rect = svg.node().getBoundingClientRect();
+  const rect = svgNode.getBoundingClientRect();
   width = rect.width || window.innerWidth;
   height = rect.height || (window.innerHeight - 56);
   svg.attr('width', width).attr('height', height);
   const stage = svg.append('g').attr('class', 'stage');
+
+  // Layer dedicato alle connessioni AI (rosse temporanee)
+  const aiLayer = stage.append('g').attr('class', 'ai-links');
+  let aiTempLinks = []; // {source: bugKey, target: taskKey, score}
 
   const colorByCategory = (c) => {
     if (c === 'epic') return '#8b5cf6';
     if (c === 'story') return '#3b82f6';
     if (c === 'task' || c === 'mobile_task' || c === 'test_execution') return '#86efac';
     if (c === 'test') return '#166534';
-    if (c === 'mobile_bug') return '#fecaca'; // rosso annacquato
-    if (c === 'bug') return '#ef4444';       // rosso standard
-    if (c === 'subtask') return '#b3d9ff';   // celeste sbiadito per subtask
+    if (c === 'mobile_bug') return '#fecaca';
+    if (c === 'bug') return '#ef4444';
     return '#94a3b8';
   };
 
-  // Nessun marker freccia: vogliamo linee semplici
-  const defs = svg.append('defs');
+  stage.append('defs');
 
   const link = stage.append('g')
     .selectAll('line')
@@ -469,17 +433,15 @@ function renderForceGraph(nodes, links, epicKey, groups = { hierLinks: [], relLi
       .attr('stroke-opacity', d => {
         const sid = typeof d.source === 'object' ? d.source.id : d.source;
         const tid = typeof d.target === 'object' ? d.target.id : d.target;
-        if (sid === epicKey || tid === epicKey) return 0.1; // 85% trasparenza (poco visibili)
+        if (sid === epicKey || tid === epicKey) return 0.1;
         return 0.8;
-      })
-      // niente freccia in coda
-      ;
+      });
 
   simulation = d3.forceSimulation(nodes)
     .force('link', d3.forceLink(links)
       .id(d => d.id)
       .distance(l => window.EJ_LAYOUT.linkDistance(l, nodes))
-      .strength(l => window.EJ_LAYOUT.linkStrength(l, nodes))
+      .strength(l => window.EJ_LAYOUT.linkStrength(l))
     )
     .force('charge', d3.forceManyBody().strength(d => window.EJ_LAYOUT.nodeCharge(d)))
     .force('center', d3.forceCenter(width / 2, height / 2))
@@ -492,12 +454,11 @@ function renderForceGraph(nodes, links, epicKey, groups = { hierLinks: [], relLi
       .attr('class', 'node')
       .call(makeDrag(simulation));
 
-  // Interazione: ALT + mousedown per iniziare il "laccio" e collegare due card
   let tempLink = null;
   let linkStart = null;
 
   function startLink(event, d) {
-    if (!event.altKey) return; // attiva solo con ALT premuto
+    if (!event.altKey) return;
     event.stopPropagation();
     linkStart = d;
     const p = d3.pointer(event, stage.node());
@@ -522,16 +483,13 @@ function renderForceGraph(nodes, links, epicKey, groups = { hierLinks: [], relLi
   function endLink(event) {
     if (!tempLink || !linkStart) return cleanupTemp();
     const p = d3.pointer(event, stage.node());
-    // Trova un nodo vicino al punto di rilascio
     const target = findNodeAt(nodes, p[0], p[1]);
     if (target && target.id !== linkStart.id) {
-      // crea link su Jira
       jiraCreateIssueLink(CURRENT_AUTH_TOKEN, linkStart.id, target.id)
         .then(() => {
           setStatus(`Creato link: ${linkStart.id} → ${target.id}`);
-          // aggiorna grafo in memoria
           links.push({ source: linkStart.id, target: target.id, kind: 'rel' });
-          renderForceGraph(nodes, links, epicKey, groups); // ridisegna
+          renderForceGraph(nodes, links, epicKey, groups);
         })
         .catch(e => setStatus(e.message || String(e), false))
         .finally(cleanupTemp);
@@ -557,28 +515,126 @@ function renderForceGraph(nodes, links, epicKey, groups = { hierLinks: [], relLi
     return best;
   }
 
-  // registra la partenza del laccio con ALT+mousedown
-  node.on('mousedown', startLink);
-  // Se mentre trascini il laccio premi ALT, continui a muovere il laccio; se rilasci ALT, il drag torna attivo grazie al filtro del d3.drag()
+  async function handleBugContextMenu(event, d) {
+    try {
+      if (String(d.category) !== 'bug' && String(d.category) !== 'mobile_bug') {
+        setStatus('AI-link: funziona solo su nodi BUG.', false);
+        return;
+      }
+      setStatus(`AI-link: leggo descrizioni per ${d.key}…`);
+      const token = CURRENT_AUTH_TOKEN;
+      const bugKey = d.key;
+      // 1) Leggi description del BUG
+      const bugText = await fetchSingleDescription(token, bugKey);
+      if (!bugText) {
+        setStatus(`Impossibile leggere la Description di ${bugKey}.`, false);
+        return;
+      }
+      // 2) Candidati: TASK (includo anche 'mobile_task')
+      const taskNodes = [];
+      svg.selectAll('g.node').data().forEach(n => {
+        if (n && (n.category === 'task' || n.category === 'mobile_task')) {
+          taskNodes.push(n);
+        }
+      });
+      if (!taskNodes.length) {
+        setStatus('Nessun TASK candidato nel grafico.', false);
+        return;
+      }
+      // 3) Leggi description di tutti i TASK candidati (batch)
+      const taskKeys = taskNodes.map(n => n.key);
+      const descMap = await fetchIssuesWithDescription(token, taskKeys);
+      // Prepara i record per la similarity
+      const items = taskNodes.map(n => ({
+        id: n.id,
+        key: n.key,
+        text: descMap.get(n.key) || '' // se vuota, Jaccard la tratterà come 0
+      }));
+      // Controlla se ci sono TASK con descrizioni significative
+      const nonEmpty = items.filter(t => (t.text||'').trim().length > 15);
+      if (!nonEmpty.length) {
+        setStatus(`AI-link: nessun TASK con description significativa (>15 chars).`, false);
+        aiTempLinks = [];
+        aiLayer.selectAll('line').remove();
+        return;
+      }
+      // NB: continuiamo ad usare 'items' per non perdere i TASK con testo corto;
+      // il controllo sopra serve solo a dare un messaggio chiaro se sono *tutti* vuoti.
+      // 4) Similarità (OpenAI se hai key, altrimenti fallback)
+      const aiKey = await getAiKey();
+      const scored = await window.EJ_AI.computeBugTaskSimilarities(bugText, items, aiKey);
+      // 5) Filtra TOP N con soglia adattiva
+      const TOP_N = 8;
+      let threshold = aiKey ? 0.18 : 0.10;                 // fallback Jaccard richiede soglia più bassa
+      const bugLen = bugText.trim().length;
+      if (bugLen < 200) threshold -= 0.03;                 // testo corto → abbasso leggermente
+      if (bugLen < 120) threshold -= 0.03;                 // molto corto → abbasso ancora
+      threshold = Math.max(threshold, 0.06);               // non scendere troppo
+      const top = scored.filter(s => s.score >= threshold).slice(0, TOP_N);
+      if (!top.length) {
+        // Conta quante description non sono vuote tra i candidati
+        const nonEmptyTasks = items.filter(t => (t.text||'').trim().length > 0).length;
+        const top3 = scored.slice(0, 3).map(x => `${x.key}=${(x.score*100).toFixed(1)}%`).join(', ') || '—';
+        setStatus(
+          `AI-link: nessuna corrispondenza utile per ${bugKey}. `
+          + `Dettagli: BUG chars=${bugText.trim().length}, TASK con descrizione=${nonEmptyTasks}/${items.length}, `
+          + `soglia=${(threshold*100).toFixed(0)}%, top3: ${top3}`,
+          false
+        );
+        // Mostra suggerimenti soft sotto-soglia (visivi ma "non validati")
+        const soft = scored.slice(0, 3);
+        aiTempLinks = soft.map(t => ({ source: bugKey, target: t.key, score: t.score, soft: true }));
+        aiLayer.selectAll('line').remove();
+        aiLayer.selectAll('line')
+          .data(aiTempLinks, d => `${d.source}->${d.target}`)
+          .join(enter => enter.append('line')
+            .attr('stroke', '#9ca3af')           // grigio
+            .attr('stroke-width', 1.5)
+            .attr('stroke-dasharray', '2 4')
+            .attr('opacity', 0.9)
+            .append('title').text(d => `AI score ${(d.score*100).toFixed(1)}% (sotto soglia)`));
+        return;
+      }
+      // 6) Disegna link rossi TEMPORANEI (nessuna tensione, non tocca la simulazione)
+      aiTempLinks = top.map(t => ({ source: bugKey, target: t.key, score: t.score }));
+      drawAiLinks();
+      const list = top.map(x => `${x.key} (${(x.score*100).toFixed(1)}%)`).join(', ');
+      setStatus(`AI-link: ${bugKey} ↔ ${list}`);
+    } catch (e) {
+      console.error('AI-link error', e);
+      setStatus(`AI-link: errore ${e.message || e}`, false);
+    }
+  }
 
-  // Disegna i simboli per ciascun nodo
+  // Ridisegna i link rossi a partire da aiTempLinks
+  function drawAiLinks() {
+    aiLayer.selectAll('title').remove();
+    aiLayer.selectAll('line')
+      .data(aiTempLinks, d => `${d.source}->${d.target}`)
+      .join(
+        enter => enter.append('line')
+          .attr('stroke', '#ef4444')
+          .attr('stroke-width', 2.2)
+          .attr('stroke-dasharray', '6 3')
+          .attr('opacity', 0.95)
+          .append('title').text(d => `AI score ${(d.score*100).toFixed(1)}%`),
+        update => update,
+        exit => exit.remove()
+      );
+  }
+
+  node.on('mousedown', startLink);
+
   node.each(function(d) {
     const g = d3.select(this);
     const R = d.id === epicKey ? 10 : 7;
 
-    // Base circle
-    const circle = g.append('circle')
+    g.append('circle')
       .attr('r', R)
       .attr('fill', colorByCategory(d.category))
       .attr('stroke', '#fff')
       .attr('stroke-width', 1.25);
-    
-    // Opacità ridotta per subtask (celeste trasparente sbiadito)
-    if (d.category === 'subtask') {
-      circle.attr('fill-opacity', 0.5);
-    }
 
-    // Overlay per tipo
     if (d.category === 'task' || d.category === 'bug' || d.category === 'mobile_bug') {
       g.append('circle')
         .attr('r', Math.round(R * 0.45))
@@ -611,6 +667,12 @@ function renderForceGraph(nodes, links, epicKey, groups = { hierLinks: [], relLi
         .attr('d', `M ${-k/2},${-k} L ${-k/2},${k} L ${k},0 Z`)
         .attr('fill', '#ffffff');
     }
+  });
+
+  // Click destro: se BUG => calcola similarità con TASK e disegna link rossi temporanei
+  node.on('contextmenu', (event, d) => {
+    event.preventDefault();
+    handleBugContextMenu(event, d);
   });
 
   const label = stage.append('g')
@@ -649,12 +711,27 @@ function renderForceGraph(nodes, links, epicKey, groups = { hierLinks: [], relLi
       .attr('x2', d => d.target.x)
       .attr('y2', d => d.target.y);
 
-    node
-      .attr('transform', d => `translate(${d.x},${d.y})`);
+    // Allinea i link AI temporanei (non fanno parte della force)
+    aiLayer.selectAll('line')
+      .attr('x1', d => {
+        const s = nodes.find(n => n.id === d.source);
+        return s ? s.x : 0;
+      })
+      .attr('y1', d => {
+        const s = nodes.find(n => n.id === d.source);
+        return s ? s.y : 0;
+      })
+      .attr('x2', d => {
+        const t = nodes.find(n => n.id === d.target);
+        return t ? t.x : 0;
+      })
+      .attr('y2', d => {
+        const t = nodes.find(n => n.id === d.target);
+        return t ? t.y : 0;
+      });
 
-    label
-      .attr('x', d => d.x)
-      .attr('y', d => d.y - (d.id === epicKey ? 10 : 7));
+    node.attr('transform', d => `translate(${d.x},${d.y})`);
+    label.attr('x', d => d.x).attr('y', d => d.y - (d.id === epicKey ? 10 : 7));
   });
 
   window.addEventListener('resize', () => {
@@ -663,11 +740,17 @@ function renderForceGraph(nodes, links, epicKey, groups = { hierLinks: [], relLi
     simulation.force('center', d3.forceCenter(r.width / 2, r.height / 2)).alpha(0.2).restart();
   });
 
-  // Zoom/pan solo sulla tela: Ctrl+wheel per zoom, pan con middle-button
+  // Doppio click sullo sfondo = pulisci i link AI temporanei
+  svg.on('dblclick', () => {
+    aiTempLinks = [];
+    aiLayer.selectAll('line').remove();
+    setStatus('AI-link temporanei rimossi.');
+  });
+
   const zoom = d3.zoom()
     .filter(ev => (ev.type === 'wheel' && ev.ctrlKey) || (ev.type === 'mousedown' && (ev.button === 1 || ev.buttons === 4)))
     .scaleExtent([0.2, 5])
-    .wheelDelta((ev) => ev.deltaY * -0.004) // sensibilità 5x più fine dell'attuale
+    .wheelDelta((ev) => ev.deltaY * -0.004)
     .on('zoom', (ev) => stage.attr('transform', ev.transform));
   svg.call(zoom);
   svg.node().addEventListener('wheel', (e) => { if (e.ctrlKey) e.preventDefault(); }, { passive: false });
@@ -685,7 +768,6 @@ function makeDrag(sim) {
     if (!event.active) sim.alphaTarget(0);
     d.fx = null; d.fy = null;
   }
-  // Disabilita il drag quando è premuto ALT (per usare la creazione del laccio)
   return d3.drag()
     .filter(ev => !ev.altKey)
     .on('start', dragstarted)
@@ -709,19 +791,66 @@ function maskAuthHeader(value) {
   return '(masked)';
 }
 
+// =============== ADF (Atlassian Doc Format) -> testo semplice ===============
+function adfToPlain(adf) {
+  // Gestione base: concatena testo dei nodi 'text', 'paragraph', 'heading', 'bulletList/orderedList'
+  try {
+    if (!adf) return '';
+    if (typeof adf === 'string') return adf;
+    const out = [];
+    (function walk(node) {
+      if (!node) return;
+      if (Array.isArray(node)) return node.forEach(walk);
+      const t = node.type;
+      if (t === 'text' && node.text) out.push(node.text);
+      if (node.content) walk(node.content);
+      if (t === 'paragraph' || t === 'heading') out.push('\n');
+      if (t === 'hardBreak') out.push('\n');
+      if (t === 'bulletList' || t === 'orderedList') {
+        (node.content||[]).forEach(li => walk(li));
+        out.push('\n');
+      }
+    })(adf);
+    return out.join(' ').replace(/\s+\n\s+/g, '\n').replace(/\s{2,}/g, ' ').trim();
+  } catch { return ''; }
+}
+
+// =============== Lettura description per N issue (batch) ====================
+async function fetchIssuesWithDescription(token, keys) {
+  if (!keys?.length) return new Map();
+  const MAX = 50;
+  const result = new Map(); // key -> plainDescription
+  for (let i = 0; i < keys.length; i += MAX) {
+    const chunk = keys.slice(i, i + MAX);
+    const jql = `key in (${chunk.join(',')})`;
+    // Qui chiediamo esplicitamente la 'description'
+    const issues = await jiraSearch(token, jql, ['summary','issuetype','description']).catch(() => []);
+    for (const it of issues) {
+      const k = it.key;
+      const adf = it.fields?.description || '';
+      const plain = adfToPlain(adf);
+      result.set(k, plain);
+    }
+  }
+  return result;
+}
+
+async function fetchSingleDescription(token, key) {
+  const m = await fetchIssuesWithDescription(token, [key]);
+  return m.get(key) || '';
+}
+
 // UI wiring
 (async () => {
   const params = new URLSearchParams(location.search);
   const epicParam = params.get('epic');
 
-  // Caricamento automatico alla selezione dalla tendina
   epicSelect.addEventListener('change', () => {
     const opt = epicSelect.value;
     if (!opt) return;
     loadGraph(opt);
   });
 
-  // Popola select con gli epici della sprint attiva
   try {
     const { token } = await getCreds();
     setStatus('Carico epici della sprint attiva…');

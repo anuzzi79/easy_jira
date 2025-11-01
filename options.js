@@ -1,83 +1,78 @@
-const baseUrlEl = document.getElementById('baseUrl');
-const emailEl = document.getElementById('email');
-const apiKeyEl = document.getElementById('apiKey');
-const saveBtn = document.getElementById('save');
-const testBtn = document.getElementById('test');
-const statusEl = document.getElementById('status');
+// options.js
 
-(async () => {
-  const { jiraBaseUrl, jiraEmail, jiraApiKey } = await chrome.storage.sync.get(['jiraBaseUrl','jiraEmail','jiraApiKey']);
-  baseUrlEl.value = jiraBaseUrl || 'https://facilitygrid.atlassian.net/';
-  if (jiraEmail) emailEl.value = jiraEmail;
-  if (jiraApiKey) apiKeyEl.value = jiraApiKey;
-})();
+const el = (id) => document.getElementById(id);
+const statusEl = el('status');
 
-saveBtn.addEventListener('click', async () => {
-  const jiraBaseUrl = baseUrlEl.value.trim();
-  const jiraEmail = emailEl.value.trim();
-  const jiraApiKey = apiKeyEl.value.trim();
+function setStatus(msg, ok = true) {
+  statusEl.textContent = msg;
+  statusEl.className = 'status ' + (ok ? 'ok' : 'err');
+}
 
-  if (!jiraBaseUrl || !jiraEmail || !jiraApiKey) {
-    statusEl.textContent = 'Compila base URL, email e API key.';
-    statusEl.style.color = '#c00';
-    return;
-  }
-  // normalizza URL con trailing slash rimosso
-  const normalized = jiraBaseUrl.replace(/\/$/, '');
-  await chrome.storage.sync.set({ jiraBaseUrl: normalized, jiraEmail, jiraApiKey });
-  statusEl.textContent = 'Salvato ✅';
-  statusEl.style.color = '#0a7';
-  setTimeout(() => statusEl.textContent = '', 2000);
-});
-
-async function testConnection() {
-  const jiraBaseUrl = (baseUrlEl.value.trim() || '').replace(/\/$/, '');
-  const jiraEmail = emailEl.value.trim();
-  const jiraApiKey = apiKeyEl.value.trim();
-  if (!jiraBaseUrl || !jiraEmail || !jiraApiKey) {
-    statusEl.textContent = 'Inserisci base URL, email e API key.';
-    statusEl.style.color = '#c00';
-    return;
-  }
-  statusEl.textContent = 'Test in corso…';
-  statusEl.style.color = '#666';
+async function load() {
   try {
-    const token = btoa(`${jiraEmail}:${jiraApiKey}`);
-    const res = await fetch(`${jiraBaseUrl}/rest/api/3/myself`, {
-      method: 'GET',
-      headers: {
-        'Authorization': `Basic ${token}`,
-        'Accept': 'application/json'
-      },
-      credentials: 'omit',
-      cache: 'no-store',
-      redirect: 'follow',
-      mode: 'cors'
-    });
+    const {
+      jiraBaseUrl = 'https://facilitygrid.atlassian.net',
+      jiraEmail = '',
+      jiraApiKey = '',
+      openAiApiKey = ''
+    } = await chrome.storage.sync.get([
+      'jiraBaseUrl','jiraEmail','jiraApiKey','openAiApiKey'
+    ]);
 
-    const textBody = await res.text();
-    if (!res.ok) {
-      const snippet = textBody.slice(0, 200);
-      throw new Error(`HTTP ${res.status}: ${snippet}`);
-    }
+    el('jiraBaseUrl').value = jiraBaseUrl || '';
+    el('jiraEmail').value = jiraEmail || '';
+    el('jiraApiKey').value = jiraApiKey || '';
+    el('openAiApiKey').value = openAiApiKey || '';
 
-    let data;
-    try {
-      data = JSON.parse(textBody);
-    } catch {
-      throw new Error('Risposta non valida (non JSON)');
-    }
-
-    if (!data || (!data.accountId && !data.emailAddress && !data.self)) {
-      throw new Error('Credenziali non valide');
-    }
-
-    statusEl.textContent = `OK: ${data.displayName || data.emailAddress || 'utente'}`;
-    statusEl.style.color = '#0a7';
+    setStatus('Impostazioni caricate.', true);
   } catch (e) {
-    statusEl.textContent = `Connessione fallita: ${e.message}`;
-    statusEl.style.color = '#c00';
+    console.error(e);
+    setStatus('Errore nel caricamento delle impostazioni.', false);
   }
 }
 
-testBtn.addEventListener('click', testConnection);
+async function save() {
+  const jiraBaseUrl = el('jiraBaseUrl').value.trim();
+  const jiraEmail   = el('jiraEmail').value.trim();
+  const jiraApiKey  = el('jiraApiKey').value.trim();
+  const openAiApiKey = el('openAiApiKey').value.trim();
+
+  if (!jiraBaseUrl || !jiraEmail || !jiraApiKey) {
+    setStatus('Compila Jira Base URL, Email e Jira API Key.', false);
+    return;
+  }
+
+  try {
+    await chrome.storage.sync.set({ jiraBaseUrl, jiraEmail, jiraApiKey, openAiApiKey });
+    setStatus('Salvato.', true);
+  } catch (e) {
+    console.error(e);
+    setStatus('Errore nel salvataggio.', false);
+  }
+}
+
+async function clearKeys() {
+  try {
+    await chrome.storage.sync.set({ jiraApiKey: '', openAiApiKey: '' });
+    el('jiraApiKey').value = '';
+    el('openAiApiKey').value = '';
+    setStatus('Chiavi cancellate.', true);
+  } catch (e) {
+    console.error(e);
+    setStatus('Errore nella cancellazione.', false);
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  load();
+
+  el('save').addEventListener('click', save);
+  el('clear').addEventListener('click', clearKeys);
+
+  el('showJira').addEventListener('change', (ev) => {
+    el('jiraApiKey').type = ev.target.checked ? 'text' : 'password';
+  });
+  el('showOpenAI').addEventListener('change', (ev) => {
+    el('openAiApiKey').type = ev.target.checked ? 'text' : 'password';
+  });
+});
