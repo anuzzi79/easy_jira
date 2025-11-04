@@ -1,82 +1,86 @@
 <!doctype html>
 <html lang="it">
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>EasyJira – Settings</title>
+  <meta charset="utf-8" />
+  <title>EasyJira • Settings</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
-    :root { --bg:#0b1220; --card:#0f172a; --muted:#94a3b8; --accent:#2563eb; --ok:#16a34a; --err:#dc2626; }
-    *{box-sizing:border-box;margin:0;padding:0}
-    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0b1220;color:#e5e7eb;line-height:1.4;padding:24px}
-    .wrap{max-width:760px;margin:0 auto}
-    h1{font-size:22px;margin-bottom:16px}
-    .card{background:var(--card);border:1px solid #1f2937;border-radius:10px;padding:18px;margin-bottom:16px}
-    .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
-    label{width:160px;color:var(--muted);font-size:14px}
-    input[type="text"],input[type="password"],input[type="email"],input[type="url"]{
-      flex:1;min-width:240px;background:#0b1220;border:1px solid #334155;color:#e5e7eb;
-      padding:10px 12px;border-radius:8px;font-size:14px;outline:none
+    :root {
+      --bg:#f7f9fc; --card:#fff; --txt:#0f172a; --muted:#475569;
+      --pri:#2563eb; --ok:#16a34a; --err:#dc2626; --warn:#f59e0b; --bor:#e5e7eb;
     }
-    .btn{background:var(--accent);color:#fff;border:none;border-radius:8px;padding:10px 16px;cursor:pointer}
-    .btn:hover{filter:brightness(1.05)}
-    .muted{color:var(--muted);font-size:12px;margin-top:6px}
-    .status{margin-top:10px;font-size:13px}
-    .status.ok{color:var(--ok)}
-    .status.err{color:var(--err)}
-    .inline{display:flex;align-items:center;gap:10px}
-    .sep{height:1px;background:#1f2937;margin:14px 0}
-    small.code{font-family:ui-monospace,Menlo,Consolas,monospace;color:#cbd5e1}
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--txt);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
+    .wrap{max-width:920px;margin:32px auto;padding:0 16px}
+    h1{font-size:22px;margin:0 0 16px}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+    .card{background:var(--card);border:1px solid var(--bor);border-radius:10px;padding:18px}
+    .card h2{font-size:16px;margin:0 0 12px;color:var(--muted)}
+    label{display:block;font-size:12px;color:var(--muted);margin:10px 0 6px}
+    input[type=text],input[type=password]{width:100%;padding:10px;border:1px solid var(--bor);border-radius:8px;font-size:14px}
+    .row{display:flex;gap:10px;align-items:center}
+    .btn{border:0;border-radius:8px;padding:10px 14px;cursor:pointer;font-size:14px}
+    .btn.primary{background:var(--pri);color:#fff}
+    .btn.ghost{background:#0f172a;color:#fff}
+    .btn.subtle{background:#111827;color:#fff}
+    .muted{color:var(--muted);font-size:12px}
+    .chip{display:inline-flex;align-items:center;gap:8px;padding:8px 10px;border-radius:999px;font-size:12px;border:1px solid var(--bor)}
+    .chip.ok{background:#ecfdf5;border-color:#10b981;color:#065f46}
+    .chip.err{background:#fef2f2;border-color:#ef4444;color:#991b1b}
+    .chip.warn{background:#fffbeb;border-color:#f59e0b;color:#92400e}
+    pre.out{white-space:pre-wrap;word-break:break-word;background:#0b1020;color:#e6edf3;border-radius:10px;padding:12px;font-size:12px;max-height:220px;overflow:auto;border:1px solid #1f2937}
+    .footer{display:flex;justify-content:space-between;align-items:center;margin-top:16px}
+    .hint{font-size:12px;color:var(--muted)}
+    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,'Liberation Mono','Courier New',monospace}
   </style>
 </head>
 <body>
   <div class="wrap">
-    <h1>Impostazioni EasyJira</h1>
+    <h1>EasyJira • Settings</h1>
 
-    <div class="card">
-      <div class="row">
-        <label for="jiraBaseUrl">Jira Base URL</label>
-        <input id="jiraBaseUrl" type="url" placeholder="https://your-domain.atlassian.net">
-      </div>
-      <div class="row" style="margin-top:10px">
-        <label for="jiraEmail">Jira Email</label>
-        <input id="jiraEmail" type="email" placeholder="nome@azienda.com">
-      </div>
-      <div class="row" style="margin-top:10px">
-        <label for="jiraApiKey">Jira API Key</label>
-        <input id="jiraApiKey" type="password" placeholder="••••••••••••••••">
-      </div>
-      <div class="inline" style="margin-top:8px">
-        <input id="showJira" type="checkbox">
-        <label for="showJira" style="width:auto">Mostra Jira API Key</label>
-      </div>
-      <p class="muted">Ottieni la chiave su <small class="code">https://id.atlassian.com → Security → API token</small>.</p>
+    <div class="grid">
+      <!-- JIRA -->
+      <section class="card">
+        <h2>Credenziali Jira</h2>
+        <label for="jiraBaseUrl">Base URL (es. https://facilitygrid.atlassian.net)</label>
+        <input id="jiraBaseUrl" type="text" placeholder="https://…">
+        <label for="jiraEmail">Email Jira</label>
+        <input id="jiraEmail" type="text" placeholder="nome@azienda.com">
+        <label for="jiraApiKey">API Token Jira</label>
+        <input id="jiraApiKey" type="password" placeholder="••••••••••">
+        <div class="footer">
+          <button id="saveJira" class="btn primary">Salva credenziali Jira</button>
+          <span id="jiraSaveStatus" class="hint">Non salvato</span>
+        </div>
+      </section>
+
+      <!-- OPENAI -->
+      <section class="card">
+        <h2>OpenAI (Embeddings)</h2>
+        <label for="openAiApiKey">OpenAI API Key (PT-BR: “chave”)</label>
+        <input id="openAiApiKey" type="password" placeholder="sk-…">
+        <div class="row">
+          <button id="saveOpenAI" class="btn primary">Salva chiave</button>
+          <button id="testOpenAI" class="btn ghost" title="Esegue un ping al modello di embeddings">Test OpenAI</button>
+          <span id="openAiState" class="chip warn">In attesa di test</span>
+        </div>
+        <p class="muted" style="margin-top:8px">
+          Il grafico usa gli <span class="mono">embeddings</span> (modello <span class="mono">text-embedding-3-large</span>) per il matching BUG→TASK.
+          Se la chiamata fallisce, passa al fallback Jaccard.
+        </p>
+        <pre id="testOutput" class="out" aria-live="polite"></pre>
+      </section>
     </div>
 
-    <div class="card">
-      <h2 style="font-size:16px;margin-bottom:10px">Intelligenza Artificiale (OpenAI)</h2>
-      <div class="row">
-        <label for="openAiApiKey">OpenAI API Key</label>
-        <input id="openAiApiKey" type="password" placeholder="sk-...">
+    <!-- Utilità -->
+    <section class="card" style="margin-top:16px">
+      <h2>Utilità</h2>
+      <div class="row" style="gap:12px;flex-wrap:wrap">
+        <button id="revealKeys" class="btn subtle">Mostra/Nascondi chiavi</button>
+        <button id="clearOpenAI" class="btn subtle">Rimuovi chiave OpenAI</button>
+        <span class="muted">Le chiavi sono salvate in <span class="mono">chrome.storage.sync</span>.</span>
       </div>
-      <div class="inline" style="margin-top:8px">
-        <input id="showOpenAI" type="checkbox">
-        <label for="showOpenAI" style="width:auto">Mostra OpenAI API Key</label>
-      </div>
-      <p class="muted">
-        Verrà usata più avanti per un agente che, con click destro su un nodo <em>BUG</em>, analizzerà similarità con <em>TASK</em> vicini (description-to-description).
-      </p>
-    </div>
-
-    <div class="card">
-      <div class="row">
-        <button id="save" class="btn">Salva</button>
-        <button id="clear" class="btn" style="background:#475569">Cancella chiavi</button>
-      </div>
-      <div id="status" class="status"></div>
-      <p class="muted" style="margin-top:8px">
-        Dati salvati in <small class="code">chrome.storage.sync</small> (sincronizzati col tuo account Chrome).
-      </p>
-    </div>
+    </section>
   </div>
 
   <script src="options.js"></script>

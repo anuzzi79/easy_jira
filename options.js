@@ -1,78 +1,151 @@
-// options.js
+// options.js – Settings + Test OpenAI
+// Salvataggi in chrome.storage.sync:
+//  - jiraBaseUrl, jiraEmail, jiraApiKey
+//  - openAiApiKey
 
-const el = (id) => document.getElementById(id);
-const statusEl = el('status');
+const $ = (id) => document.getElementById(id);
+const jiraBaseUrl = $('jiraBaseUrl');
+const jiraEmail = $('jiraEmail');
+const jiraApiKey = $('jiraApiKey');
+const openAiApiKey = $('openAiApiKey');
 
-function setStatus(msg, ok = true) {
-  statusEl.textContent = msg;
-  statusEl.className = 'status ' + (ok ? 'ok' : 'err');
+const saveJiraBtn = $('saveJira');
+const jiraSaveStatus = $('jiraSaveStatus');
+
+const saveOpenAIBtn = $('saveOpenAI');
+const testOpenAIBtn = $('testOpenAI');
+const openAiState = $('openAiState');
+const testOutput = $('testOutput');
+
+const revealBtn = $('revealKeys');
+const clearOpenAI = $('clearOpenAI');
+
+function setChip(kind, text) {
+  openAiState.className = 'chip ' + (kind || 'warn');
+  openAiState.textContent = text || 'In attesa di test';
 }
 
-async function load() {
-  try {
-    const {
-      jiraBaseUrl = 'https://facilitygrid.atlassian.net',
-      jiraEmail = '',
-      jiraApiKey = '',
-      openAiApiKey = ''
-    } = await chrome.storage.sync.get([
-      'jiraBaseUrl','jiraEmail','jiraApiKey','openAiApiKey'
-    ]);
-
-    el('jiraBaseUrl').value = jiraBaseUrl || '';
-    el('jiraEmail').value = jiraEmail || '';
-    el('jiraApiKey').value = jiraApiKey || '';
-    el('openAiApiKey').value = openAiApiKey || '';
-
-    setStatus('Impostazioni caricate.', true);
-  } catch (e) {
-    console.error(e);
-    setStatus('Errore nel caricamento delle impostazioni.', false);
-  }
+function mask(val) {
+  if (!val) return '';
+  const s = String(val);
+  if (s.length <= 8) return '••••';
+  return s.slice(0, 4) + '••••' + s.slice(-4);
 }
 
-async function save() {
-  const jiraBaseUrl = el('jiraBaseUrl').value.trim();
-  const jiraEmail   = el('jiraEmail').value.trim();
-  const jiraApiKey  = el('jiraApiKey').value.trim();
-  const openAiApiKey = el('openAiApiKey').value.trim();
+async function loadSettings() {
+  const cfg = await chrome.storage.sync.get([
+    'jiraBaseUrl','jiraEmail','jiraApiKey','openAiApiKey'
+  ]);
+  jiraBaseUrl.value = cfg.jiraBaseUrl || '';
+  jiraEmail.value = cfg.jiraEmail || '';
+  jiraApiKey.value = cfg.jiraApiKey || '';
+  openAiApiKey.value = cfg.openAiApiKey || '';
 
-  if (!jiraBaseUrl || !jiraEmail || !jiraApiKey) {
-    setStatus('Compila Jira Base URL, Email e Jira API Key.', false);
+  jiraSaveStatus.textContent = 'Pronto';
+  setChip(openAiApiKey.value ? 'warn' : 'err',
+          openAiApiKey.value ? 'Chiave presente, testa per conferma' : 'Chiave assente');
+  testOutput.textContent = '';
+}
+
+async function saveJira() {
+  await chrome.storage.sync.set({
+    jiraBaseUrl: jiraBaseUrl.value.trim(),
+    jiraEmail: jiraEmail.value.trim(),
+    jiraApiKey: jiraApiKey.value.trim()
+  });
+  jiraSaveStatus.textContent = 'Salvato ✓';
+  setTimeout(() => (jiraSaveStatus.textContent = 'Pronto'), 1500);
+}
+
+async function saveOpenAI() {
+  await chrome.storage.sync.set({ openAiApiKey: openAiApiKey.value.trim() });
+  setChip(openAiApiKey.value ? 'warn' : 'err',
+          openAiApiKey.value ? 'Chiave salvata, testa ora' : 'Chiave rimossa');
+  testOutput.textContent = '';
+}
+
+async function testOpenAI() {
+  const key = (await chrome.storage.sync.get(['openAiApiKey'])).openAiApiKey || openAiApiKey.value.trim();
+  if (!key) {
+    setChip('err', 'Chiave assente');
+    testOutput.textContent = 'Inserisci una OpenAI API Key e premi “Salva chiave”.';
     return;
   }
 
+  setChip('warn', 'Test in corso…');
+  testOutput.textContent = 'Eseguo richiesta a https://api.openai.com/v1/embeddings…';
+
+  const url = 'https://api.openai.com/v1/embeddings';
+  const body = {
+    model: 'text-embedding-3-large',
+    input: 'ping'
+  };
+
+  const started = performance.now();
   try {
-    await chrome.storage.sync.set({ jiraBaseUrl, jiraEmail, jiraApiKey, openAiApiKey });
-    setStatus('Salvato.', true);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${key}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body),
+      // MV3: niente credenziali, niente cache
+      credentials: 'omit', cache: 'no-store', mode: 'cors'
+    });
+
+    const elapsed = Math.round(performance.now() - started);
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      setChip('err', `Errore ${res.status}`);
+      testOutput.textContent =
+        `❌ OpenAI NON raggiungibile o chiave non valida.\n` +
+        `Status: ${res.status} ${res.statusText}\n` +
+        `Tempo: ${elapsed} ms\n` +
+        `Body (primi 400 chars):\n${txt.slice(0,400)}`;
+      return;
+    }
+
+    const data = await res.json();
+    const dim = (data?.data?.[0]?.embedding || []).length || 'n/d';
+    setChip('ok', 'OK (Embeddings attivi)');
+    testOutput.textContent =
+      `✅ Test riuscito.\n` +
+      `Modello: text-embedding-3-large\n` +
+      `Dimensione embedding: ${dim}\n` +
+      `Tempo: ${elapsed} ms\n` +
+      `Suggerimento: ora nel grafico vedrai “Método: Embeddings (semântico)”.`;
   } catch (e) {
-    console.error(e);
-    setStatus('Errore nel salvataggio.', false);
+    setChip('err', 'Errore di rete');
+    testOutput.textContent =
+      `❌ Errore di rete/ambiente.\n` +
+      `Dettaglio: ${e?.message || e}\n\n` +
+      `Possibili cause:\n` +
+      `• Proxy/antivirus bloccano la richiesta\n` +
+      `• Permessi host mancanti nel manifest\n` +
+      `• Offline o DNS\n`;
   }
 }
 
-async function clearKeys() {
-  try {
-    await chrome.storage.sync.set({ jiraApiKey: '', openAiApiKey: '' });
-    el('jiraApiKey').value = '';
-    el('openAiApiKey').value = '';
-    setStatus('Chiavi cancellate.', true);
-  } catch (e) {
-    console.error(e);
-    setStatus('Errore nella cancellazione.', false);
-  }
+let revealed = false;
+function toggleReveal() {
+  revealed = !revealed;
+  jiraApiKey.type = revealed ? 'text' : 'password';
+  openAiApiKey.type = revealed ? 'text' : 'password';
+  revealBtn.textContent = revealed ? 'Nascondi chiavi' : 'Mostra/Nascondi chiavi';
 }
 
-document.addEventListener('DOMContentLoaded', () => {
-  load();
+async function wipeOpenAI() {
+  await chrome.storage.sync.set({ openAiApiKey: '' });
+  openAiApiKey.value = '';
+  setChip('err','Chiave rimossa');
+  testOutput.textContent = 'La chiave OpenAI è stata rimossa.';
+}
 
-  el('save').addEventListener('click', save);
-  el('clear').addEventListener('click', clearKeys);
+saveJiraBtn.addEventListener('click', saveJira);
+saveOpenAIBtn.addEventListener('click', saveOpenAI);
+testOpenAIBtn.addEventListener('click', testOpenAI);
+revealBtn.addEventListener('click', toggleReveal);
+clearOpenAI.addEventListener('click', wipeOpenAI);
 
-  el('showJira').addEventListener('change', (ev) => {
-    el('jiraApiKey').type = ev.target.checked ? 'text' : 'password';
-  });
-  el('showOpenAI').addEventListener('change', (ev) => {
-    el('openAiApiKey').type = ev.target.checked ? 'text' : 'password';
-  });
-});
+loadSettings();
