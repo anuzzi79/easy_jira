@@ -11,13 +11,13 @@
 // Tutto resta “drop-in” per il resto del codice.
 
 function _cosineSim(a, b) {
-    let dot = 0, na = 0, nb = 0;
-    const n = Math.min(a.length, b.length);
-    for (let i = 0; i < n; i++) { dot += a[i]*b[i]; na += a[i]*a[i]; nb += b[i]*b[i]; }
-    if (!na || !nb) return 0;
-    return dot / (Math.sqrt(na) * Math.sqrt(nb));
-  }
-  
+  let dot = 0, na = 0, nb = 0;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) { dot += a[i]*b[i]; na += a[i]*a[i]; nb += b[i]*b[i]; }
+  if (!na || !nb) return 0;
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
   const _STOP = new Set([
     // IT
     'il','lo','la','i','gli','le','un','una','uno','di','a','da','in','con','su','per','tra','fra','che','e','ma','o','non',
@@ -27,23 +27,23 @@ function _cosineSim(a, b) {
     'the','a','an','of','to','in','on','for','with','and','or','but','not','is','are','be','this','that','these','those'
   ]);
   
-  function _tokenize(text) {
-    return String(text||'')
-      .toLowerCase()
-      .replace(/https?:\/\/\S+/g,' ')
-      .replace(/[^\p{L}\p{N}\s]/gu,' ')
-      .split(/\s+/)
+function _tokenize(text) {
+  return String(text||'')
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/g,' ')
+    .replace(/[^\p{L}\p{N}\s]/gu,' ')
+    .split(/\s+/)
       .filter(w => w.length >= 3 && !_STOP.has(w));
-  }
-  
-  function _jaccard(a, b) {
-    const A = new Set(_tokenize(a)), B = new Set(_tokenize(b));
-    if (!A.size || !B.size) return 0;
-    let inter = 0;
-    for (const x of A) if (B.has(x)) inter++;
-    return inter / (A.size + B.size - inter);
-  }
-  
+}
+
+function _jaccard(a, b) {
+  const A = new Set(_tokenize(a)), B = new Set(_tokenize(b));
+  if (!A.size || !B.size) return 0;
+  let inter = 0;
+  for (const x of A) if (B.has(x)) inter++;
+  return inter / (A.size + B.size - inter);
+}
+
   // ===== Text helpers =====
   function _splitSentences(t) {
     const s = String(t||'').replace(/\s+/g,' ').trim();
@@ -153,8 +153,8 @@ function _cosineSim(a, b) {
   }
   
   // ===== Embeddings =====
-  async function _embedOpenAI(apikey, texts) {
-    const url = 'https://api.openai.com/v1/embeddings';
+async function _embedOpenAI(apikey, texts) {
+  const url = 'https://api.openai.com/v1/embeddings';
     const model = 'text-embedding-3-large';
     const MAX_CHARS = 8000;
     const safeTexts = texts.map(t => String(t || '').slice(0, MAX_CHARS));
@@ -166,16 +166,16 @@ function _cosineSim(a, b) {
       let attempt = 0;
       while (true) {
         attempt++;
-        const res = await fetch(url, {
-          method: 'POST',
+  const res = await fetch(url, {
+    method: 'POST',
           headers: { 'Content-Type':'application/json', 'Authorization':`Bearer ${apikey}` },
           body: JSON.stringify({ model, input: chunk, encoding_format: 'float' })
-        });
+  });
         if (res.ok) { const data = await res.json(); out.push(...(data.data||[]).map(d=>d.embedding||[])); break; }
         const body = await res.text().catch(()=>''), status = res.status;
         if (status === 429 && attempt < 4) { const wait = 200*attempt + Math.floor(Math.random()*120); await new Promise(r=>setTimeout(r,wait)); continue; }
         throw new Error(`OpenAI Embeddings failed (${status}): ${body.slice(0,200)}`);
-      }
+  }
     }
     return out;
   }
@@ -218,14 +218,14 @@ function _cosineSim(a, b) {
     const rel   = (sBug + sTask) / 2;
     const boost = Math.min(0.18, rel * 0.35); // boost controllato
     return Math.min(0.999, scoreBase + boost);
-  }
-  
-  /**
-   * Calcola similarità tra 1 BUG e N TASK:
+}
+
+/**
+ * Calcola similarità tra 1 BUG e N TASK:
    * - Se c'è AI key → embeddings + coseno
    * - Altrimenti → Jaccard
    * - Se sono disponibili le SPECs dell'epico → boost dello score in base alla coerenza con le specs
-   */
+ */
   async function computeBugTaskSimilarities(bugText, taskItems, aiKey, opts = {}) {
     const epicKey = opts.epicKey || '';
     const specsText = _getSpecsTextForEpic(epicKey);
@@ -243,8 +243,8 @@ function _cosineSim(a, b) {
   
         // Embeddings
         const inputs = [bug, ...withText.map(x => x.text)];
-        const vectors = await _embedOpenAI(aiKey, inputs);
-        const bugVec = vectors[0];
+      const vectors = await _embedOpenAI(aiKey, inputs);
+      const bugVec = vectors[0];
         const raw = taskItems.map((t, i) => {
           const pos = withText.findIndex(x => x.idx === i);
           if (pos === -1) return { id:t.id, key:t.key, score:0, _method:'embeddings' };
@@ -269,7 +269,7 @@ function _cosineSim(a, b) {
       return { id:t.id, key:t.key, score:boosted, _method:'jaccard', _reason:fallbackReason };
     });
     out.sort((a,b)=>b.score - a.score);
-    return out;
+      return out;
   }
   
   // ------------------- EXPLICAÇÃO / COMPARAZIONE TRIANGOLARE CON OPENAI -------------------
@@ -420,4 +420,3 @@ function _cosineSim(a, b) {
   }
   
   window.EJ_AI = { computeBugTaskSimilarities, explainLinkPTBR };
-  

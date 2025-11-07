@@ -93,9 +93,9 @@ async function jiraGetIssueRaw(token, issueKey) {
   const url = `${JIRA_BASE}/rest/api/3/issue/${encodeURIComponent(issueKey)}?expand=names,renderedFields`;
   const res = await fetch(url, {
     method: 'GET',
-    headers: {
-      'Authorization': `Basic ${token}`,
-      'Accept': 'application/json'
+      headers: {
+        'Authorization': `Basic ${token}`,
+        'Accept': 'application/json'
     },
     credentials: 'omit', cache: 'no-store', mode: 'cors'
   });
@@ -1387,9 +1387,9 @@ ${exp}
         const tag = specMeta && specMeta.ok ? `con SPECs (${specMeta.success}/${specMeta.urls.length})` : '(sem SPECs)';
         setStatus(`AI-link: scoring ${tag}.`, !!(specMeta && specMeta.ok));
       }
-      // 5) Filtra TOP N con soglia fissa 55%
+      // 5) Filtra TOP N con soglia fissa 50%
       const TOP_N = 8;
-      const MIN_SCORE = 0.55; // 55%
+      const MIN_SCORE = 0.50; // 50%
 
       const filtered = scored.filter(s => s.score >= MIN_SCORE);
       const top = filtered.slice(0, TOP_N);
@@ -1448,21 +1448,38 @@ ${exp}
       return;
     }
 
-    const scores = aiTempLinks.map(l => l.score);
-    const minScore = Math.min(...scores);
-    const maxScore = Math.max(...scores);
-    const multi = aiTempLinks.length > 1 && maxScore > minScore;
+    // Scala assoluta: 0.50 → rosa chiaro, 0.80 → rosso pieno, >0.80 → rosso quasi nero
+    const MIN_GRAD = 0.50;  // 50%
+    const MAX_GRAD = 0.80;  // 80%
 
-    // da rosso molto chiaro a rosso scuro
-    const light = { r: 254, g: 202, b: 202 }; // ~ #fecaca
-    const dark  = { r: 185, g:  28, b:  28 }; // ~ #b91c1c
+    const light = { r: 254, g: 226, b: 226 }; // rosa molto chiaro (~50%)
+    const dark  = { r: 185, g: 28,  b: 28  }; // rosso pieno (~80%)
+    const ultra = { r: 30,  g: 3,   b: 3   }; // rosso quasi nero (>80%)
 
     const lerp = (a, b, t) => a + (b - a) * t;
 
-    function colorForScore(score) {
-      // se c'è una sola linea, sempre rosso scuro
-      if (!multi) return `rgb(${dark.r},${dark.g},${dark.b})`;
-      const t = (score - minScore) / (maxScore - minScore || 1);
+    function colorForScore(scoreRaw) {
+      // scoreRaw è nello [0,1]
+      let s = Number(scoreRaw) || 0;
+      if (s < 0) s = 0;
+      if (s > 1) s = 1;
+
+      // Sotto il 50% → sempre rosa chiaro
+      if (s <= MIN_GRAD) {
+        return `rgb(${light.r},${light.g},${light.b})`;
+      }
+
+      // Sopra l'80% → gradiente dal rosso pieno al rosso quasi nero
+      if (s >= MAX_GRAD) {
+        const tHigh = (s - MAX_GRAD) / (1 - MAX_GRAD || 1); // mappa [0.80,1] → [0,1]
+        const r = Math.round(lerp(dark.r, ultra.r, tHigh));
+        const g = Math.round(lerp(dark.g, ultra.g, tHigh));
+        const b = Math.round(lerp(dark.b, ultra.b, tHigh));
+        return `rgb(${r},${g},${b})`;
+      }
+
+      // Tra 50% e 80% → gradiente da rosa chiaro a rosso pieno
+      const t = (s - MIN_GRAD) / (MAX_GRAD - MIN_GRAD || 1);
       const r = Math.round(lerp(light.r, dark.r, t));
       const g = Math.round(lerp(light.g, dark.g, t));
       const b = Math.round(lerp(light.b, dark.b, t));
