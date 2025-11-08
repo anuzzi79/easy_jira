@@ -1192,6 +1192,13 @@ ${exp}
   const aiLayer = stage.append('g').attr('class', 'ai-links');
   let aiTempLinks = []; // {source, target, score, method}
 
+  let aiRevealTimeouts = [];
+
+  function cancelAiReveal() {
+    aiRevealTimeouts.forEach(id => clearTimeout(id));
+    aiRevealTimeouts = [];
+  }
+
   // 🔧 Helper: aggiorna posizione dei link AI in base alle coordinate correnti dei nodi
   function updateAiLinkPositions() {
     aiLayer.selectAll('line.ai')
@@ -1317,123 +1324,211 @@ ${exp}
     return best;
   }
 
+  // Piccolo scheduler per ridurre i ridisegni consecutivi
+  let __ej_drawScheduled = false;
+  function scheduleDraw() {
+    if (__ej_drawScheduled) return;
+    __ej_drawScheduled = true;
+    requestAnimationFrame(() => { __ej_drawScheduled = false; drawAiLinks(); });
+  }
+
   async function handleBugContextMenu(event, d) {
     try {
+      cancelAiReveal();
+
       if (String(d.category) !== 'bug' && String(d.category) !== 'mobile_bug') {
         setStatus('AI-link: funziona solo su nodi BUG.', false);
         return;
       }
-      setStatus(`AI-link: leggo descrizioni per ${d.key}…`);
+
       const token = CURRENT_AUTH_TOKEN;
       const bugKey = d.key;
-      // 1) Leggi BUG: raw + composito
+      const epicKey = CURRENT_EPIC_KEY || '';
+
+      setStatus(`AI-link: leggo descrizioni per ${bugKey}…`);
+
+      // 1) BUG: raw + testo composito
       const bugRaw = await jiraGetIssueRaw(token, bugKey);
       const bugText = buildCompositeTextFromRaw(bugRaw, 'bug');
       const bugFields = buildCompositeFields(bugRaw, 'bug');
+
       if (!bugText) {
         setStatus(`Impossibile leggere la Description di ${bugKey}.`, false);
         return;
       }
+
       setStatus(`AI-link: BUG ${bugKey} → testo composto (${bugText.length} chars).`);
-      // 2) Candidati: TASK (includo anche 'mobile_task')
+
+      // 2) TASK candidati nel grafo
       const taskNodes = [];
       svg.selectAll('g.node').data().forEach(n => {
         if (n && (n.category === 'task' || n.category === 'mobile_task')) {
           taskNodes.push(n);
         }
       });
+
       if (!taskNodes.length) {
         setStatus('Nessun TASK candidato nel grafico.', false);
         return;
       }
-      // 3) Leggi TASK: raw + compositi
+
+      // Soglie / limiti (embeddings come filtro)
+      const TOP_N = 8;
+      const MIN_SCORE = 0.65; // 65% consigliato per embeddings
+      const CONCURRENCY = 1; // valutazione davvero sequenziale (una TASK alla volta)
+
+      // Pulizia stato AI precedente
+      cancelAiReveal();
+      aiTempLinks = [];
+      aiLayer.selectAll('line.ai').remove();
+      aiExplainMap.clear();
+
       const taskKeys = taskNodes.map(n => n.key);
       const taskRawMap = new Map();
       const taskFieldsMap = new Map();
       const descMap = new Map();
-      for (const key of taskKeys) {
-        const raw = await jiraGetIssueRaw(token, key);
-        taskRawMap.set(key, raw);
-        taskFieldsMap.set(key, buildCompositeFields(raw, 'task'));
-        descMap.set(key, buildCompositeTextFromRaw(raw, 'task'));
-      }
-      // Prepara i record per la similarity
-      const items = taskNodes.map(n => ({
-        id: n.id,
-        key: n.key,
-        text: descMap.get(n.key) || '' // se vuota, Jaccard la tratterà come 0
-      }));
-      // Controlla se ci sono TASK con descrizioni significative
-      const nonEmpty = items.filter(t => (t.text||'').trim().length > 15);
-      if (!nonEmpty.length) {
-        setStatus(`AI-link: nessun TASK con description significativa (>15 chars).`, false);
-        aiTempLinks = [];
-        aiLayer.selectAll('line').remove();
+
+      let accepted = 0;
+
+      // 3) STREAMING CON POOL: embeddings come filtro per-task → disegna subito se plausibile
+      const aiKey = await getAiKey();
+      const specMeta = window.EJ_SPECS_CACHE[epicKey];
+      const tag = specMeta && specMeta.ok
+        ? `con SPECs (${specMeta.success}/${specMeta.urls.length})`
+        : '(senza SPECs utili)';
+      if (!aiKey) {
+        setStatus(`AI-link: manca chiave OpenAI — impossibile usare embeddings come filtro ${tag}.`, false);
         return;
       }
-      // NB: continuiamo ad usare 'items' per non perdere i TASK con testo corto;
-      // il controllo sopra serve solo a dare un messaggio chiaro se sono *tutti* vuoti.
-      // 4) Similarità (OpenAI se hai key, altrimenti fallback) — con epicKey per usare SPECs
-      const aiKey = await getAiKey();
-      const scored = await window.EJ_AI.computeBugTaskSimilarities(
-        bugText,
-        items,
-        aiKey,
-        { epicKey }   // <<< abilita il boost con SPECs dell'epico
-      );
-      // Dopo: const scored = await window.EJ_AI.computeBugTaskSimilarities(...)
-      {
-        const specMeta = window.EJ_SPECS_CACHE[epicKey];
-        const tag = specMeta && specMeta.ok ? `con SPECs (${specMeta.success}/${specMeta.urls.length})` : '(sem SPECs)';
-        setStatus(`AI-link: scoring ${tag}.`, !!(specMeta && specMeta.ok));
+      setStatus(`AI-link: scan embeddings di ${taskKeys.length} TASK ${tag}…`);
+
+      // cache globale opzionale
+      window.__EJ_RAW_CACHE__ = window.__EJ_RAW_CACHE__ || {};
+      const queue = taskKeys.slice();
+      let cancelled = false;
+      let processed = 0;
+      const total = taskKeys.length;
+
+      // Timeout + retry per chiamata embeddings (per-task)
+      const TIMEOUT_MS = 12000;
+      async function withTimeout(promise, ms) {
+        return await Promise.race([
+          promise,
+          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))
+        ]);
       }
-      // 5) Filtra TOP N con soglia fissa 50%
-      const TOP_N = 8;
-      const MIN_SCORE = 0.50; // 50%
+      async function callEmbeddingsOnce(item) {
+        return await withTimeout(
+          window.EJ_AI.computeBugTaskSimilarities(
+            bugText,
+            [item],
+            aiKey,
+            { epicKey }
+          ),
+          TIMEOUT_MS
+        );
+      }
+      async function callEmbeddingsWithRetry(item) {
+        let delay = 600;
+        for (let i = 0; i < 2; i++) { // due retry rapidi con backoff
+          try {
+            return await callEmbeddingsOnce(item);
+          } catch (e) {
+            if (cancelled) return null;
+            await new Promise(r => setTimeout(r, delay));
+            delay *= 2;
+          }
+        }
+        try {
+          return await callEmbeddingsOnce(item);
+        } catch {
+          return null; // fallback: salta la TASK
+        }
+      }
 
-      const filtered = scored.filter(s => s.score >= MIN_SCORE);
-      const top = filtered.slice(0, TOP_N);
+      async function processOne(key) {
+        let matched = false;
+        try {
+          // raw con cache
+          let raw = window.__EJ_RAW_CACHE__[key];
+          if (!raw) {
+            raw = await jiraGetIssueRaw(token, key);
+            window.__EJ_RAW_CACHE__[key] = raw;
+          }
+          taskRawMap.set(key, raw);
+          taskFieldsMap.set(key, buildCompositeFields(raw, 'task'));
+          const text = buildCompositeTextFromRaw(raw, 'task') || '';
+          descMap.set(key, text);
 
-      // azzera sempre la mappa delle spiegazioni prima di ricostruirla
-      aiExplainMap.clear();
+          if (cancelled) return;
+          if (text.trim().length < 15) return; // descrizione insignificante
+          if (accepted >= TOP_N) { cancelled = true; return; }
 
-      if (!top.length) {
-        const top3 = scored.slice(0, 3)
-          .map(x => `${x.key}=${(x.score * 100).toFixed(1)}%`)
-          .join(', ') || '—';
+          // Embeddings come filtro: con timeout + retry; se fallisce → skip TASK
+          const quick = await callEmbeddingsWithRetry({ id: key, key, text });
+          if (!quick) return;
 
+          if (cancelled) return;
+          const s = quick && quick[0];
+          if (!s || s.score < MIN_SCORE) return;
+
+          accepted++;
+          const pairKey = `${bugKey}->${key}`;
+
+          aiTempLinks.push({
+            source: bugKey,
+            target: key,
+            score: s.score,
+            method: s._method || 'embeddings'
+          });
+
+          aiExplainMap.set(pairKey, {
+            fromKey: bugKey,
+            toKey: key,
+            bugText,
+            taskText: text,
+            bugFields,
+            taskFields: taskFieldsMap.get(key),
+            bugRaw,
+            taskRaw: raw,
+            score: s.score,
+            method: s._method || 'embeddings',
+            reason: s._reason || 'Embeddings gating (SPEC-aware).',
+            aiKey
+          });
+
+          scheduleDraw();
+          setStatus(`AI-link: embeddings ${bugKey} ↔ ${key} ≈ ${(s.score * 100).toFixed(1)}% (${processed+1}/${total})`);
+          matched = true;
+
+          if (accepted >= TOP_N) { cancelled = true; }
+        } catch (e) {
+          // ignora task malformati
+        } finally {
+          processed++;
+          if (!matched && !cancelled) {
+            setStatus(`AI-link: scan embeddings di ${total} TASK ${tag} (${processed}/${total})…`, !!(specMeta && specMeta.ok));
+          }
+        }
+      }
+
+      async function worker() {
+        while (!cancelled && queue.length) {
+          const key = queue.shift();
+          await processOne(key);
+        }
+      }
+
+      const workers = Array.from({ length: Math.min(CONCURRENCY, taskKeys.length) }, () => worker());
+      await Promise.all(workers);
+
+      if (accepted === 0) {
         setStatus(
-          `AI-link: nessuna corrispondenza ≥ ${Math.round(MIN_SCORE * 100)}% per ${bugKey}. ` +
-          `Top3 grezzi: ${top3}`,
+          `AI-link: nessuna corrispondenza ≥ ${Math.round(MIN_SCORE * 100)}% con embeddings.`,
           false
         );
-        aiTempLinks = [];
-        aiLayer.selectAll('line.ai').remove();
-        return;
       }
 
-      // TOP validati: memorizza per spiegazioni e disegna rosso
-      aiTempLinks = top.map(t => ({ source: bugKey, target: t.key, score: t.score, method: t._method }));
-      for (const t of top) {
-        const pairKey = `${bugKey}->${t.key}`;
-        aiExplainMap.set(pairKey, {
-          fromKey: bugKey,
-          toKey: t.key,
-          bugText,
-          taskText: (descMap.get(t.key) || ''),
-          bugFields,
-          taskFields: taskFieldsMap.get(t.key),
-          bugRaw,
-          taskRaw: taskRawMap.get(t.key),
-          score: t.score,
-          method: t._method,
-          reason: t._reason || '',
-          aiKey    // 👈 passiamo la OpenAI API key alla spiegazione
-        });
-      }
-      drawAiLinks();
-      const list = top.map(x => `${x.key} (${(x.score*100).toFixed(1)}%)`).join(', ');
-      setStatus(`AI-link: ${bugKey} ↔ ${list}`);
     } catch (e) {
       console.error('AI-link error', e);
       setStatus(`AI-link: errore ${e.message || e}`, false);
@@ -1656,8 +1751,9 @@ ${exp}
 
   // Doppio click sullo sfondo = pulisci i link AI temporanei
   svg.on('dblclick', () => {
+    cancelAiReveal();
     aiTempLinks = [];
-    aiExplainMap.clear();         // <— aggiungi questa riga
+    aiExplainMap.clear();
     aiLayer.selectAll('line.ai').remove();
     setStatus('AI-link temporanei rimossi.');
   });
