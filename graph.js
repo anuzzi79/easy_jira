@@ -944,19 +944,38 @@ function renderForceGraph(nodes, links, epicKey, groups = { hierLinks: [], relLi
       menu.style.display = 'none';
 
       const {
-        bugText,
-        taskText,
+        sourceText,
+        targetText,
         score,
         method,
         fromKey,
         toKey,
         reason,
+        sourceFields,
+        targetFields,
+        sourceRaw,
+        targetRaw,
+        sourceKind,
+        targetKind,
+        aiKey,
+        // Backward compatibility con vecchi payload (se esistono)
+        bugText,
+        taskText,
         bugFields,
         taskFields,
         bugRaw,
-        taskRaw,
-        aiKey
+        taskRaw
       } = payload;
+      
+      // Fallback per backward compatibility
+      const actualSourceText = sourceText || bugText || '';
+      const actualTargetText = targetText || taskText || '';
+      const actualSourceFields = sourceFields || bugFields || {};
+      const actualTargetFields = targetFields || taskFields || {};
+      const actualSourceRaw = sourceRaw || bugRaw || null;
+      const actualTargetRaw = targetRaw || taskRaw || null;
+      const actualSourceKind = sourceKind || 'bug';
+      const actualTargetKind = targetKind || 'task';
 
       // --- FUNZIONE PER ESTRARRE TESTO DA ADF ---
       function extractADFText(node) {
@@ -1013,6 +1032,14 @@ function renderForceGraph(nodes, links, epicKey, groups = { hierLinks: [], relLi
         'Possible Solution',
         'Chosen Solution',
         'Summary of Changes'
+      ];
+      
+      const STORY_EXPECTED_FIELDS = [
+        'Description'
+      ];
+      
+      const TEST_EXPECTED_FIELDS = [
+        'Description'
       ];
 
       // --- FORMATTAZIONE DEI CAMPI PREVISTI (ORA CON SUMMARY + STEPS SOLO PER BUG) ---
@@ -1111,23 +1138,55 @@ ${lines.join('\n')}
 `;
       };
 
-      const bugSection = formatExpectedFields(`🐞 BUG: ${fromKey}`, bugRaw, BUG_EXPECTED_FIELDS, 'bug');
-      const taskSection = formatExpectedFields(`🧩 TASK: ${toKey}`, taskRaw, TASK_EXPECTED_FIELDS, 'task');
+      // Helper per scegliere icona e campi in base al kind
+      const getIconForKind = (kind) => {
+        if (kind === 'bug') return '🐞';
+        if (kind === 'task') return '🧩';
+        if (kind === 'story') return '📖';
+        if (kind === 'test') return '🧪';
+        return '📋';
+      };
+      
+      const getFieldsForKind = (kind) => {
+        if (kind === 'bug') return BUG_EXPECTED_FIELDS;
+        if (kind === 'task') return TASK_EXPECTED_FIELDS;
+        if (kind === 'story') return STORY_EXPECTED_FIELDS;
+        if (kind === 'test') return TEST_EXPECTED_FIELDS;
+        return ['Description'];
+      };
+      
+      const sourceIcon = getIconForKind(actualSourceKind);
+      const targetIcon = getIconForKind(actualTargetKind);
+      const sourceFieldsList = getFieldsForKind(actualSourceKind);
+      const targetFieldsList = getFieldsForKind(actualTargetKind);
+      
+      const sourceSection = formatExpectedFields(
+        `${sourceIcon} ${actualSourceKind.toUpperCase()}: ${fromKey}`, 
+        actualSourceRaw, 
+        sourceFieldsList, 
+        actualSourceKind
+      );
+      const targetSection = formatExpectedFields(
+        `${targetIcon} ${actualTargetKind.toUpperCase()}: ${toKey}`, 
+        actualTargetRaw, 
+        targetFieldsList, 
+        actualTargetKind
+      );
 
       // 🔥 QUI CHIAMIAMO OPENAI PER LA COMPARAZIONE TRIANGOLARE
       const epicKey = CURRENT_EPIC_KEY || '';
       const exp = await window.EJ_AI.explainLinkPTBR(
-        bugText || '',
-        taskText || '',
+        actualSourceText || '',
+        actualTargetText || '',
         score || 0,
         method || 'jaccard',
         reason || '',
-        { epicKey, aiKey }          // 👈 passiamo anche la chiave OpenAI
+        { epicKey, aiKey, sourceKind: actualSourceKind, targetKind: actualTargetKind }
       );
 
       // --- Contenuto base del modale (SENZA "Testo Composito") ---
       const detail = `
-${bugSection}${taskSection}
+${sourceSection}${targetSection}
 
 ──────────────────────────────
 🧠 COMPARAZIONE TRIANGOLARE (OpenAI)
@@ -1137,13 +1196,13 @@ ${exp}
 
 <br><br>
 
-<button id="dumpBug" style="background:#1976d2;color:#fff;border:none;padding:6px 10px;margin:4px;cursor:pointer;border-radius:6px;">🔵 Dump BUG Fields</button>
+<button id="dumpSource" style="background:#1976d2;color:#fff;border:none;padding:6px 10px;margin:4px;cursor:pointer;border-radius:6px;">🔵 Dump ${fromKey} Fields</button>
 
-<button id="dumpTask" style="background:#388e3c;color:#fff;border:none;padding:6px 10px;margin:4px;cursor:pointer;border-radius:6px;">🟢 Dump TASK Fields</button>
+<button id="dumpTarget" style="background:#388e3c;color:#fff;border:none;padding:6px 10px;margin:4px;cursor:pointer;border-radius:6px;">🟢 Dump ${toKey} Fields</button>
 
-<div id="bugDump" style="display:none;white-space:pre-wrap;font-size:12px;background:#f8f8f8;border:1px solid #ccc;border-radius:8px;padding:8px;margin-top:6px;"></div>
+<div id="sourceDump" style="display:none;white-space:pre-wrap;font-size:12px;background:#f8f8f8;border:1px solid #ccc;border-radius:8px;padding:8px;margin-top:6px;"></div>
 
-<div id="taskDump" style="display:none;white-space:pre-wrap;font-size:12px;background:#f8f8f8;border:1px solid #ccc;border-radius:8px;padding:8px;margin-top:6px;"></div>
+<div id="targetDump" style="display:none;white-space:pre-wrap;font-size:12px;background:#f8f8f8;border:1px solid #ccc;border-radius:8px;padding:8px;margin-top:6px;"></div>
 
 `;
 
@@ -1152,34 +1211,34 @@ ${exp}
 
       // --- Gestione pulsanti dump ---
       setTimeout(() => {
-        const btnBug = document.getElementById('dumpBug');
-        const btnTask = document.getElementById('dumpTask');
-        const divBug = document.getElementById('bugDump');
-        const divTask = document.getElementById('taskDump');
+        const btnSource = document.getElementById('dumpSource');
+        const btnTarget = document.getElementById('dumpTarget');
+        const divSource = document.getElementById('sourceDump');
+        const divTarget = document.getElementById('targetDump');
 
         const prettyJSON = (data) => JSON.stringify(data, null, 2);
 
-        if (btnBug) {
-          btnBug.onclick = () => {
-            divBug.style.display = divBug.style.display === 'none' ? 'block' : 'none';
-            if (divBug.innerText.trim() === '') {
-              divBug.innerText = prettyJSON({
-                fields: bugRaw?.fields || {},
-                names: bugRaw?.names || {},
-                renderedFields: bugRaw?.renderedFields || {}
+        if (btnSource) {
+          btnSource.onclick = () => {
+            divSource.style.display = divSource.style.display === 'none' ? 'block' : 'none';
+            if (divSource.innerText.trim() === '') {
+              divSource.innerText = prettyJSON({
+                fields: actualSourceRaw?.fields || {},
+                names: actualSourceRaw?.names || {},
+                renderedFields: actualSourceRaw?.renderedFields || {}
               });
             }
           };
         }
 
-        if (btnTask) {
-          btnTask.onclick = () => {
-            divTask.style.display = divTask.style.display === 'none' ? 'block' : 'none';
-            if (divTask.innerText.trim() === '') {
-              divTask.innerText = prettyJSON({
-                fields: taskRaw?.fields || {},
-                names: taskRaw?.names || {},
-                renderedFields: taskRaw?.renderedFields || {}
+        if (btnTarget) {
+          btnTarget.onclick = () => {
+            divTarget.style.display = divTarget.style.display === 'none' ? 'block' : 'none';
+            if (divTarget.innerText.trim() === '') {
+              divTarget.innerText = prettyJSON({
+                fields: actualTargetRaw?.fields || {},
+                names: actualTargetRaw?.names || {},
+                renderedFields: actualTargetRaw?.renderedFields || {}
               });
             }
           };
@@ -1332,50 +1391,72 @@ ${exp}
     requestAnimationFrame(() => { __ej_drawScheduled = false; drawAiLinks(); });
   }
 
-  async function handleBugContextMenu(event, d) {
+  async function handleNodeContextMenu(event, d) {
     try {
       cancelAiReveal();
 
-      if (String(d.category) !== 'bug' && String(d.category) !== 'mobile_bug') {
-        setStatus('AI-link: funziona solo su nodi BUG.', false);
+      // Categorie supportate per AI-link
+      const INCLUDED_CATEGORIES = ['bug', 'mobile_bug', 'task', 'mobile_task', 'story', 'test'];
+      const category = String(d.category || '').toLowerCase();
+      
+      if (!INCLUDED_CATEGORIES.includes(category)) {
+        setStatus('AI-link: funziona su Bug, Task, Story e Test (esclusi Epic, Test Execution, Subtask).', false);
         return;
       }
 
       const token = CURRENT_AUTH_TOKEN;
-      const bugKey = d.key;
+      const sourceKey = d.key;
       const epicKey = CURRENT_EPIC_KEY || '';
 
-      setStatus(`AI-link: leggo descrizioni per ${bugKey}…`);
+      // Determina il 'kind' per buildCompositeTextFromRaw
+      let sourceKind = 'bug';
+      if (category === 'task' || category === 'mobile_task') sourceKind = 'task';
+      else if (category === 'story') sourceKind = 'story';
+      else if (category === 'test') sourceKind = 'test';
+      else if (category === 'bug' || category === 'mobile_bug') sourceKind = 'bug';
 
-      // 1) BUG: raw + testo composito
-      const bugRaw = await jiraGetIssueRaw(token, bugKey);
-      const bugText = buildCompositeTextFromRaw(bugRaw, 'bug');
-      const bugFields = buildCompositeFields(bugRaw, 'bug');
+      setStatus(`AI-link: leggo descrizioni per ${sourceKey}…`);
 
-      if (!bugText) {
-        setStatus(`Impossibile leggere la Description di ${bugKey}.`, false);
+      // 1) Nodo sorgente: raw + testo composito
+      const sourceRaw = await jiraGetIssueRaw(token, sourceKey);
+      const sourceText = buildCompositeTextFromRaw(sourceRaw, sourceKind);
+      const sourceFields = buildCompositeFields(sourceRaw, sourceKind);
+
+      if (!sourceText) {
+        setStatus(`Impossibile leggere i campi di ${sourceKey}.`, false);
         return;
       }
 
-      setStatus(`AI-link: BUG ${bugKey} → testo composto (${bugText.length} chars).`);
+      setStatus(`AI-link: ${sourceKey} → testo composto (${sourceText.length} chars).`);
 
-      // 2) TASK candidati nel grafo
-      const taskNodes = [];
+      // 2) Nodi candidati nel grafo (tutte le categorie supportate, eccetto il nodo sorgente)
+      const targetNodes = [];
       svg.selectAll('g.node').data().forEach(n => {
-        if (n && (n.category === 'task' || n.category === 'mobile_task')) {
-          taskNodes.push(n);
+        if (n && INCLUDED_CATEGORIES.includes(String(n.category || '').toLowerCase()) && n.key !== sourceKey) {
+          targetNodes.push(n);
         }
       });
 
-      if (!taskNodes.length) {
-        setStatus('Nessun TASK candidato nel grafico.', false);
+      if (!targetNodes.length) {
+        setStatus('Nessun nodo candidato nel grafico.', false);
         return;
       }
 
+      // Conta nodi per categoria (diagnostica)
+      const categoryCount = {};
+      targetNodes.forEach(n => {
+        const cat = String(n.category || 'unknown').toLowerCase();
+        categoryCount[cat] = (categoryCount[cat] || 0) + 1;
+      });
+      const catSummary = Object.entries(categoryCount)
+        .map(([cat, count]) => `${count} ${cat}`)
+        .join(', ');
+      console.log(`[AI-link] Nodi candidati per categoria: ${catSummary}`);
+
       // Soglie / limiti (embeddings come filtro)
-      const TOP_N = 8;
-      const MIN_SCORE = 0.65; // 65% consigliato per embeddings
-      const CONCURRENCY = 1; // valutazione davvero sequenziale (una TASK alla volta)
+      const TOP_N = 20; // aumentato per più risultati cross-category
+      const MIN_SCORE = 0.60; // 60% soglia per match di qualità
+      const CONCURRENCY = 1; // valutazione davvero sequenziale (un nodo alla volta)
 
       // Pulizia stato AI precedente
       cancelAiReveal();
@@ -1383,14 +1464,14 @@ ${exp}
       aiLayer.selectAll('line.ai').remove();
       aiExplainMap.clear();
 
-      const taskKeys = taskNodes.map(n => n.key);
-      const taskRawMap = new Map();
-      const taskFieldsMap = new Map();
+      const targetKeys = targetNodes.map(n => n.key);
+      const targetRawMap = new Map();
+      const targetFieldsMap = new Map();
       const descMap = new Map();
 
       let accepted = 0;
 
-      // 3) STREAMING CON POOL: embeddings come filtro per-task → disegna subito se plausibile
+      // 3) STREAMING CON POOL: embeddings come filtro per-target → disegna subito se plausibile
       const aiKey = await getAiKey();
       const specMeta = window.EJ_SPECS_CACHE[epicKey];
       const tag = specMeta && specMeta.ok
@@ -1400,16 +1481,21 @@ ${exp}
         setStatus(`AI-link: manca chiave OpenAI — impossibile usare embeddings come filtro ${tag}.`, false);
         return;
       }
-      setStatus(`AI-link: scan embeddings di ${taskKeys.length} TASK ${tag}…`);
+      setStatus(`AI-link: scan embeddings di ${targetKeys.length} nodi (${catSummary}) ${tag}…`);
 
       // cache globale opzionale
       window.__EJ_RAW_CACHE__ = window.__EJ_RAW_CACHE__ || {};
-      const queue = taskKeys.slice();
+      const queue = targetKeys.slice();
       let cancelled = false;
       let processed = 0;
-      const total = taskKeys.length;
+      const total = targetKeys.length;
+      
+      // Contatori diagnostici
+      let skippedNoDescription = 0;
+      let skippedShortText = 0;
+      let skippedLowScore = 0;
 
-      // Timeout + retry per chiamata embeddings (per-task)
+      // Timeout + retry per chiamata embeddings (per-target)
       const TIMEOUT_MS = 12000;
       async function withTimeout(promise, ms) {
         return await Promise.race([
@@ -1420,7 +1506,7 @@ ${exp}
       async function callEmbeddingsOnce(item) {
         return await withTimeout(
           window.EJ_AI.computeBugTaskSimilarities(
-            bugText,
+            sourceText,
             [item],
             aiKey,
             { epicKey }
@@ -1442,7 +1528,7 @@ ${exp}
         try {
           return await callEmbeddingsOnce(item);
         } catch {
-          return null; // fallback: salta la TASK
+          return null; // fallback: salta il nodo target
         }
       }
 
@@ -1455,42 +1541,66 @@ ${exp}
             raw = await jiraGetIssueRaw(token, key);
             window.__EJ_RAW_CACHE__[key] = raw;
           }
-          taskRawMap.set(key, raw);
-          taskFieldsMap.set(key, buildCompositeFields(raw, 'task'));
-          const text = buildCompositeTextFromRaw(raw, 'task') || '';
+          
+          // Determina il kind del target
+          const targetNode = targetNodes.find(n => n.key === key);
+          const targetCategory = String(targetNode?.category || '').toLowerCase();
+          let targetKind = 'task';
+          if (targetCategory === 'bug' || targetCategory === 'mobile_bug') targetKind = 'bug';
+          else if (targetCategory === 'task' || targetCategory === 'mobile_task') targetKind = 'task';
+          else if (targetCategory === 'story') targetKind = 'story';
+          else if (targetCategory === 'test') targetKind = 'test';
+          
+          targetRawMap.set(key, raw);
+          targetFieldsMap.set(key, buildCompositeFields(raw, targetKind));
+          const text = buildCompositeTextFromRaw(raw, targetKind) || '';
           descMap.set(key, text);
 
           if (cancelled) return;
-          if (text.trim().length < 15) return; // descrizione insignificante
+          // Skip nodi senza description (ottimizzazione: evita chiamate embeddings inutili)
+          const hasDescription = raw?.fields?.description || raw?.renderedFields?.description;
+          if (!hasDescription) {
+            skippedNoDescription++;
+            return;
+          }
+          if (text.trim().length < 15) {
+            skippedShortText++;
+            return; // descrizione insignificante
+          }
           if (accepted >= TOP_N) { cancelled = true; return; }
 
-          // Embeddings come filtro: con timeout + retry; se fallisce → skip TASK
+          // Embeddings come filtro: con timeout + retry; se fallisce → skip nodo
           const quick = await callEmbeddingsWithRetry({ id: key, key, text });
           if (!quick) return;
 
           if (cancelled) return;
           const s = quick && quick[0];
-          if (!s || s.score < MIN_SCORE) return;
+          if (!s || s.score < MIN_SCORE) {
+            skippedLowScore++;
+            return;
+          }
 
           accepted++;
-          const pairKey = `${bugKey}->${key}`;
+          const pairKey = `${sourceKey}->${key}`;
 
           aiTempLinks.push({
-            source: bugKey,
+            source: sourceKey,
             target: key,
             score: s.score,
             method: s._method || 'embeddings'
           });
 
           aiExplainMap.set(pairKey, {
-            fromKey: bugKey,
+            fromKey: sourceKey,
             toKey: key,
-            bugText,
-            taskText: text,
-            bugFields,
-            taskFields: taskFieldsMap.get(key),
-            bugRaw,
-            taskRaw: raw,
+            sourceText,
+            targetText: text,
+            sourceFields,
+            targetFields: targetFieldsMap.get(key),
+            sourceRaw,
+            targetRaw: raw,
+            sourceKind,
+            targetKind,
             score: s.score,
             method: s._method || 'embeddings',
             reason: s._reason || 'Embeddings gating (SPEC-aware).',
@@ -1498,16 +1608,16 @@ ${exp}
           });
 
           scheduleDraw();
-          setStatus(`AI-link: embeddings ${bugKey} ↔ ${key} ≈ ${(s.score * 100).toFixed(1)}% (${processed+1}/${total})`);
+          setStatus(`AI-link: embeddings ${sourceKey} ↔ ${key} ≈ ${(s.score * 100).toFixed(1)}% (${processed+1}/${total})`);
           matched = true;
 
           if (accepted >= TOP_N) { cancelled = true; }
         } catch (e) {
-          // ignora task malformati
+          // ignora nodi malformati
         } finally {
           processed++;
           if (!matched && !cancelled) {
-            setStatus(`AI-link: scan embeddings di ${total} TASK ${tag} (${processed}/${total})…`, !!(specMeta && specMeta.ok));
+            setStatus(`AI-link: scan embeddings di ${total} nodi ${tag} (${processed}/${total})…`, !!(specMeta && specMeta.ok));
           }
         }
       }
@@ -1519,8 +1629,12 @@ ${exp}
         }
       }
 
-      const workers = Array.from({ length: Math.min(CONCURRENCY, taskKeys.length) }, () => worker());
+      const workers = Array.from({ length: Math.min(CONCURRENCY, targetKeys.length) }, () => worker());
       await Promise.all(workers);
+
+      // Log diagnostico finale
+      console.log(`[AI-link] Risultati: ${accepted} match accettati, ${processed} nodi processati`);
+      console.log(`[AI-link] Filtrati: ${skippedNoDescription} senza description, ${skippedShortText} testo corto, ${skippedLowScore} score basso (<${Math.round(MIN_SCORE * 100)}%)`);
 
       if (accepted === 0) {
         setStatus(
@@ -1694,10 +1808,10 @@ ${exp}
     }
   });
 
-  // Click destro: se BUG => calcola similarità con TASK e disegna link rossi temporanei
+  // Click destro: calcola similarità con altri nodi e disegna link rossi temporanei
   node.on('contextmenu', (event, d) => {
     event.preventDefault();
-    handleBugContextMenu(event, d);
+    handleNodeContextMenu(event, d);
   });
 
   const label = stage.append('g')
@@ -1894,7 +2008,7 @@ function _getRenderedOrPlainField(raw, fieldId) {
   }
 }
 
-// Costruisce il testo "composito" per un'issue raw, secondo il "kind" ("bug" o "task").
+// Costruisce il testo "composito" per un'issue raw, secondo il "kind" ("bug", "task", "story", "test").
 // Include SEMPRE la Description come base; poi concatena i campi richiesti.
 function buildCompositeTextFromRaw(raw, kind = 'bug') {
   if (!raw) return '';
@@ -1933,14 +2047,19 @@ function buildCompositeTextFromRaw(raw, kind = 'bug') {
     }
   };
 
-  // 🔹 SUMMARY sempre per primo (BUG & TASK)
+  // 🔹 SUMMARY sempre per primo (tutti i tipi)
   const summaryText = getRenderedOrPlain('summary');
   if (summaryText) {
     chunks.push(`Summary:\n${summaryText}`);
   }
 
-  // Description
+  // Description sempre inclusa
   tryFieldByName('description');
+
+  // 🔹 Per STORY e TEST: solo Summary + Description (già inclusi sopra)
+  if (kind === 'story' || kind === 'test') {
+    return chunks.join('\n\n');
+  }
 
   // 🔹 STEPS TO REPRODUCE: SOLO SE kind === 'bug'
   if (
@@ -1953,7 +2072,7 @@ function buildCompositeTextFromRaw(raw, kind = 'bug') {
     }
   }
 
-  // Expected Results, Analysis, Possible Solution, ecc.
+  // Expected Results, Analysis, Possible Solution, ecc. (solo per BUG e TASK)
   tryFieldByName('expected results');
   tryFieldByName('analysis');
   tryFieldByName('possible solution');
@@ -1991,12 +2110,18 @@ function buildCompositeFields(raw, kind = 'bug') {
     }
   } catch {}
   
-  // Pattern in base al tipo
-  const patterns = (String(kind).toLowerCase() === 'task') ? TASK_FIELD_PATTERNS : BUG_FIELD_PATTERNS;
+  // 🔹 Per STORY e TEST: solo Summary + Description (già inclusi sopra)
+  const kindLower = String(kind).toLowerCase();
+  if (kindLower === 'story' || kindLower === 'test') {
+    return out;
+  }
+  
+  // Pattern in base al tipo (solo per BUG e TASK)
+  const patterns = (kindLower === 'task') ? TASK_FIELD_PATTERNS : BUG_FIELD_PATTERNS;
   const ids = _collectFieldIds(names, patterns);
   
   // ORDER
-  const ORDER = (String(kind).toLowerCase() === 'task')
+  const ORDER = (kindLower === 'task')
     ? [/possible\s*solutions?/i, /chosen\s*solution/i, /summary\s*of\s*changes?/i]
     : [/expected\s*results?/i, /steps?\s*to\s*reproduce/i, /analysis/i, /possible\s*solutions?/i, /chosen\s*solution/i, /summary\s*of\s*changes?/i];
   

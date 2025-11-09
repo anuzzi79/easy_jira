@@ -7,8 +7,10 @@
 //  - computeBugTaskSimilarities(bugText, taskItems, aiKey, opts?)
 //      opts = { epicKey?: string }  // se passato, usa le specs di quell'epico
 //  - explainLinkPTBR(bugText, taskText, score, method, reason, opts?)
+//    opts può includere: { epicKey, aiKey, sourceKind, targetKind }
+//    sourceKind e targetKind supportano: 'bug', 'task', 'story', 'test'
 //
-// Tutto resta “drop-in” per il resto del codice.
+// Tutto resta "drop-in" per il resto del codice.
 
 function _cosineSim(a, b) {
   let dot = 0, na = 0, nb = 0;
@@ -274,15 +276,27 @@ async function _embedOpenAI(apikey, texts) {
   
   // ------------------- EXPLICAÇÃO / COMPARAZIONE TRIANGOLARE CON OPENAI -------------------
   async function explainLinkPTBR(bugText, taskText, score, method, reason, opts = {}) {
-    const { epicKey = '', aiKey = '' } = opts;
+    const { epicKey = '', aiKey = '', sourceKind = 'bug', targetKind = 'task' } = opts;
 
     const specsText = _getSpecsTextForEpic(epicKey) || '';
+    
+    // Helper per label leggibili
+    const getLabel = (kind) => {
+      if (kind === 'bug') return 'BUG';
+      if (kind === 'task') return 'TASK';
+      if (kind === 'story') return 'STORY';
+      if (kind === 'test') return 'TEST';
+      return kind.toUpperCase();
+    };
+    
+    const sourceLabel = getLabel(sourceKind);
+    const targetLabel = getLabel(targetKind);
 
     // Fallback locale (se manca AI key o i testi sono vuoti)
     function localFallback() {
-      const simBugTask = _jaccard(bugText, taskText);
-      const simBugSpecs = specsText ? _jaccard(bugText, specsText) : 0;
-      const simTaskSpecs = specsText ? _jaccard(taskText, specsText) : 0;
+      const simSourceTarget = _jaccard(bugText, taskText);
+      const simSourceSpecs = specsText ? _jaccard(bugText, specsText) : 0;
+      const simTargetSpecs = specsText ? _jaccard(taskText, specsText) : 0;
 
       const fmt = v => `${(v * 100).toFixed(1)}%`;
       const livello = v => {
@@ -294,8 +308,8 @@ async function _embedOpenAI(apikey, texts) {
 
       const hasSpecs = specsText.trim().length > 0;
       const avgTri = hasSpecs
-        ? (simBugTask + simBugSpecs + simTaskSpecs) / 3
-        : simBugTask;
+        ? (simSourceTarget + simSourceSpecs + simTargetSpecs) / 3
+        : simSourceTarget;
 
       let conclusione;
       if (avgTri >= 0.40) {
@@ -310,10 +324,10 @@ async function _embedOpenAI(apikey, texts) {
 
       const rigaSpecs = hasSpecs
         ? [
-            `BUG–SPECs : ${fmt(simBugSpecs)} (similarità ${livello(simBugSpecs)})`,
-            `TASK–SPECs: ${fmt(simTaskSpecs)} (similarità ${livello(simTaskSpecs)})`
+            `${sourceLabel}–SPECs : ${fmt(simSourceSpecs)} (similarità ${livello(simSourceSpecs)})`,
+            `${targetLabel}–SPECs: ${fmt(simTargetSpecs)} (similarità ${livello(simTargetSpecs)})`
           ].join('\n')
-        : 'Nessun testo SPEC disponibile per questo epic (non posso confrontare BUG/TASK con le SPECs).';
+        : `Nessun testo SPEC disponibile per questo epic (non posso confrontare ${sourceLabel}/${targetLabel} con le SPECs).`;
 
       const fallbackLine =
         (method === 'jaccard' && reason)
@@ -321,14 +335,14 @@ async function _embedOpenAI(apikey, texts) {
           : '';
 
       return [
-        'Triangolo BUG–TASK–SPEC (fallback locale senza OpenAI chat)',
+        `Triangolo ${sourceLabel}–${targetLabel}–SPEC (fallback locale senza OpenAI chat)`,
         '',
-        `BUG–TASK : ${fmt(simBugTask)} (similarità ${livello(simBugTask)})`,
+        `${sourceLabel}–${targetLabel} : ${fmt(simSourceTarget)} (similarità ${livello(simSourceTarget)})`,
         rigaSpecs,
         '',
         `Conclusione: ${conclusione}`,
         '',
-        `Dettaglio link BUG–TASK: score AI = ${fmt(score)} (${method === 'embeddings' ? 'embeddings' : 'jaccard'}).${fallbackLine}`
+        `Dettaglio link ${sourceLabel}–${targetLabel}: score AI = ${fmt(score)} (${method === 'embeddings' ? 'embeddings' : 'jaccard'}).${fallbackLine}`
       ].join('\n');
     }
 
@@ -347,6 +361,66 @@ async function _embedOpenAI(apikey, texts) {
     const bugShort = bug.slice(0, MAX);
     const taskShort = task.slice(0, MAX);
 
+    // Helper per costruire il prompt dinamicamente in base ai tipi
+    function buildPromptForTypes(sourceKind, targetKind) {
+      const combinations = {
+        'bug-task': {
+          system: `Confronta tre testi: SPEC di business, descrizione BUG e descrizione TASK. Analizza:
+1) Se il BUG rispetta/viola le SPEC;
+2) Se la TASK è allineata alle SPEC;
+3) Se BUG e TASK parlano dello stesso problema.`,
+          conclusion: 'fortemente collegati (stesso bug/fix)'
+        },
+        'bug-story': {
+          system: `Confronta tre testi: SPEC di business, descrizione BUG e descrizione STORY. Analizza:
+1) Se il BUG impatta funzionalità descritte nella STORY;
+2) Se la STORY rispetta le SPEC;
+3) Se il BUG blocca o degrada la STORY.`,
+          conclusion: 'fortemente collegati (bug impatta story)'
+        },
+        'bug-test': {
+          system: `Confronta tre testi: SPEC di business, descrizione BUG e descrizione TEST. Analizza:
+1) Se il TEST rileva il BUG descritto;
+2) Se il TEST valida le SPEC;
+3) Se BUG e TEST sono correlati nella copertura.`,
+          conclusion: 'fortemente collegati (test copre bug)'
+        },
+        'task-story': {
+          system: `Confronta tre testi: SPEC di business, descrizione TASK e descrizione STORY. Analizza:
+1) Se la TASK implementa la STORY;
+2) Se entrambe rispettano le SPEC;
+3) Se la TASK è un subtask della STORY.`,
+          conclusion: 'fortemente collegati (task implementa story)'
+        },
+        'task-test': {
+          system: `Confronta tre testi: SPEC di business, descrizione TASK e descrizione TEST. Analizza:
+1) Se il TEST valida la TASK implementata;
+2) Se entrambe rispettano le SPEC;
+3) Se il TEST copre i requisiti della TASK.`,
+          conclusion: 'fortemente collegati (test valida task)'
+        },
+        'story-test': {
+          system: `Confronta tre testi: SPEC di business, descrizione STORY e descrizione TEST. Analizza:
+1) Se il TEST valida la STORY;
+2) Se entrambe rispettano le SPEC;
+3) Se il TEST copre i requisiti della STORY.`,
+          conclusion: 'fortemente collegati (test valida story)'
+        },
+        'default': {
+          system: `Confronta tre testi: SPEC di business, primo elemento e secondo elemento. Analizza:
+1) Come il primo elemento si relaziona alle SPEC;
+2) Come il secondo elemento si relaziona alle SPEC;
+3) Se i due elementi sono correlati tra loro.`,
+          conclusion: 'fortemente collegati (stesso contesto)'
+        }
+      };
+      
+      const key = `${sourceKind}-${targetKind}`;
+      return combinations[key] || combinations['default'];
+    }
+    
+    const promptConfig = buildPromptForTypes(sourceKind, targetKind);
+
     try {
       const url = 'https://api.openai.com/v1/chat/completions';
       const model = 'gpt-4o-mini'; // puoi cambiarlo se preferisci un altro modello
@@ -355,16 +429,13 @@ async function _embedOpenAI(apikey, texts) {
         {
           role: 'system',
           content: [
-            'Sei un assistente che confronta tre testi: SPEC di business, descrizione BUG e descrizione TASK.',
-            'Devi fare una comparazione TRIANGOLARE SPEC–BUG–TASK, molto concisa, in italiano.',
+            promptConfig.system,
+            'Devi fare una comparazione TRIANGOLARE molto concisa, in italiano.',
             'Regole:',
             '- non inventare dettagli che non sono nei testi;',
             '- niente papiri: massimo ~10 righe;',
-            '- struttura chiara, tipo:',
-            '  1) Quanto il BUG rispetta/viola le SPEC;',
-            '  2) Quanto la TASK è allineata alle SPEC;',
-            '  3) Se BUG e TASK parlano davvero dello stesso problema;',
-            '- chiudi con una frase di conclusione secca (es. "fortemente collegati", "collegati ma parziali", "quasi indipendenti").'
+            '- struttura chiara e numerata;',
+            `- chiudi con una frase di conclusione secca (es. "${promptConfig.conclusion}", "collegati ma parziali", "quasi indipendenti").`
           ].join('\n')
         },
         {
@@ -375,13 +446,13 @@ async function _embedOpenAI(apikey, texts) {
             '=== SPEC (testo caricato da Confluence) ===',
             specShort || '(nessuna SPEC disponibile per questo epic)',
             '',
-            '=== BUG (testo composito) ===',
+            `=== ${sourceLabel} (testo composito) ===`,
             bugShort,
             '',
-            '=== TASK (testo composito) ===',
+            `=== ${targetLabel} (testo composito) ===`,
             taskShort,
             '',
-            `Score semantico BUG–TASK (0–1): ${score.toFixed(3)} (metodo: ${method})`,
+            `Score semantico ${sourceLabel}–${targetLabel} (0–1): ${score.toFixed(3)} (metodo: ${method})`,
             reason ? `Nota tecnica: ${reason}` : ''
           ].join('\n')
         }
