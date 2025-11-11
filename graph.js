@@ -62,7 +62,8 @@ const STATUS_SPECIAL_OPTIONS = [
   { key: '__NONE__', label: 'None' }
 ];
 let activeStatusFilters = new Set(STATUS_SEQUENCE);
-let statusCursorController = null;
+let statusCursorStart = null;
+let statusCursorEnd = null;
 const currentGraphState = {
   nodeSelection: null,
   labelSelection: null,
@@ -501,26 +502,41 @@ function buildStatusFilterOptions() {
   });
 
   const overlay = document.getElementById('statusCursorOverlay');
-  const line = document.getElementById('statusCursorLine');
-  const handle = document.getElementById('statusCursorHandle');
+  const lineStart = document.getElementById('statusCursorLineStart');
+  const handleStart = document.getElementById('statusCursorHandleStart');
+  const lineEnd = document.getElementById('statusCursorLineEnd');
+  const handleEnd = document.getElementById('statusCursorHandleEnd');
 
   if (overlay && !overlay.dataset.initialized) {
     overlay.dataset.initialized = '1';
   }
 
-  if (!statusCursorController) {
-    statusCursorController = new StatusCursor({
+  if (!statusCursorStart) {
+    statusCursorStart = new StatusCursor({
       list: container,
-      line,
-      handle
+      line: lineStart,
+      handle: handleStart
     });
-    statusCursorController.mount();
+    statusCursorStart.mount();
   } else {
-    statusCursorController.refresh();
+    statusCursorStart.refresh();
   }
 
-  const initialIndex = firstIdx !== -1 ? firstIdx : 0;
-  statusCursorController.setPositionFromIndex(initialIndex);
+  if (!statusCursorEnd) {
+    statusCursorEnd = new StatusCursor({
+      list: container,
+      line: lineEnd,
+      handle: handleEnd
+    });
+    statusCursorEnd.mount();
+  } else {
+    statusCursorEnd.refresh();
+  }
+
+  const initialStartIndex = firstIdx !== -1 ? firstIdx : 0;
+  const initialEndIndex = lastIdx !== -1 ? lastIdx : options.length - 1;
+  statusCursorStart?.setPositionFromIndex(initialStartIndex);
+  statusCursorEnd?.setPositionFromIndex(initialEndIndex);
 }
 
 function normalizeEpicKey(k) {
