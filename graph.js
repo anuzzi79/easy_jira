@@ -287,6 +287,16 @@ class StatusCursor {
 let statusCursorStart = null;
 let statusCursorEnd = null;
 let cursorAdjusting = false;
+let curtainStatusSet = new Set();
+
+function getStatusFromEndpoint(endpoint) {
+  if (!endpoint) return null;
+  const node = typeof endpoint === 'object'
+    ? endpoint
+    : currentGraphState.nodesByKey.get(endpoint);
+  if (!node) return null;
+  return node.status || node.data?.status || null;
+}
 
 function ensureCursorOrder(sourceCursor) {
   if (cursorAdjusting) return;
@@ -303,6 +313,57 @@ function ensureCursorOrder(sourceCursor) {
     statusCursorEnd.setPosition(startPos);
   }
   cursorAdjusting = false;
+}
+
+function recomputeCurtainStatuses() {
+  const container = document.getElementById('statusFilterList');
+  if (!container || !statusCursorStart || !statusCursorEnd) return;
+  const options = Array.from(container.querySelectorAll('.filter-option input[data-status]'));
+  if (!options.length) return;
+  const startPos = statusCursorStart.getPosition();
+  const endPos = statusCursorEnd.getPosition();
+  if (startPos == null || endPos == null) return;
+  const minPos = Math.min(startPos, endPos);
+  const maxPos = Math.max(startPos, endPos);
+  curtainStatusSet = new Set();
+  options.forEach(input => {
+    const wrapper = input.closest('.filter-option');
+    if (!wrapper) return;
+    const rect = wrapper.getBoundingClientRect();
+    const listRect = container.getBoundingClientRect();
+    const top = rect.top - listRect.top + container.scrollTop;
+    const bottom = top + rect.height;
+    const overlapsTopCurtain = top < minPos;
+    const overlapsBottomCurtain = bottom > maxPos;
+    if (overlapsTopCurtain || overlapsBottomCurtain) {
+      curtainStatusSet.add(normalizeStatusName(input.dataset.status));
+    }
+  });
+  applyStatusCurtainOpacity();
+}
+
+function applyStatusCurtainOpacity() {
+  const nodeSel = currentGraphState.nodeSelection;
+  const labelSel = currentGraphState.labelSelection;
+  const linkSel = currentGraphState.linkSelection;
+  if (!nodeSel || !labelSel || !linkSel) return;
+  nodeSel.style('opacity', d => {
+    if (!statusIsAllowed(d.status)) return 0;
+    return curtainStatusSet.has(normalizeStatusName(d.status)) ? 0.15 : 1;
+  });
+  labelSel.style('opacity', d => {
+    if (!statusIsAllowed(d.status)) return 0;
+    return curtainStatusSet.has(normalizeStatusName(d.status)) ? 0.15 : 1;
+  });
+  linkSel.style('opacity', d => {
+    const sourceStatus = getStatusFromEndpoint(d.source);
+    const targetStatus = getStatusFromEndpoint(d.target);
+    if (!sourceStatus || !targetStatus) return 1;
+    if (!statusIsAllowed(sourceStatus) || !statusIsAllowed(targetStatus)) return 0;
+    const inCurtain = curtainStatusSet.has(normalizeStatusName(sourceStatus)) &&
+      curtainStatusSet.has(normalizeStatusName(targetStatus));
+    return inCurtain ? 0.15 : 1;
+  });
 }
 
 // Cache SPECs per epico (vive solo finché la pagina è aperta)
@@ -501,6 +562,8 @@ function applyStatusFilters() {
   if (typeof window.EJ_REDRAW_AI_LINKS === 'function') {
     window.EJ_REDRAW_AI_LINKS();
   }
+  recomputeCurtainStatuses();
+  applyStatusCurtainOpacity();
 }
 
 function bindStatusFilterEvents() {
@@ -605,7 +668,7 @@ function buildStatusFilterOptions() {
       handle: handleStart,
       curtain: curtainStart,
       mode: 'from',
-      onMove: (_, cursor) => ensureCursorOrder(cursor)
+      onMove: (_, cursor) => { ensureCursorOrder(cursor); recomputeCurtainStatuses(); }
     });
     statusCursorStart.mount();
   } else {
@@ -619,7 +682,7 @@ function buildStatusFilterOptions() {
       handle: handleEnd,
       curtain: curtainEnd,
       mode: 'to',
-      onMove: (_, cursor) => ensureCursorOrder(cursor)
+      onMove: (_, cursor) => { ensureCursorOrder(cursor); recomputeCurtainStatuses(); }
     });
     statusCursorEnd.mount();
   } else {
@@ -645,6 +708,7 @@ function buildStatusFilterOptions() {
   const initialEndIndex = lastIdx !== -1 ? lastIdx : options.length - 1;
   statusCursorStart?.setPositionFromIndex(initialStartIndex);
   statusCursorEnd?.setPositionFromIndex(initialEndIndex);
+  recomputeCurtainStatuses();
 }
 
 function normalizeEpicKey(k) {
