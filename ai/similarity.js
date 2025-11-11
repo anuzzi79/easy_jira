@@ -211,15 +211,63 @@ async function _embedOpenAI(apikey, texts) {
     try{ return ts ? new Date(ts).toLocaleString() : ''; }catch{ return ''; }
   }
   
-  // Combina scoreBase con "evidenza specs": media(Jaccard(specs, bug), Jaccard(specs, task))
-  // e applica un boost moderato (cap a 0.18)
-  function _applySpecsBoost(scoreBase, bugText, taskText, specsText) {
-    if (!specsText || !bugText || !taskText) return scoreBase;
-    const sBug  = _jaccard(specsText, bugText);
-    const sTask = _jaccard(specsText, taskText);
-    const rel   = (sBug + sTask) / 2;
-    const boost = Math.min(0.18, rel * 0.35); // boost controllato
-    return Math.min(0.999, scoreBase + boost);
+// Calcola quanto i singoli testi ripetono il contenuto delle SPEC (contesto) e applica una lieve penalizzazione
+// in modo che il punteggio finale rifletta soprattutto la specificità nodo↔nodo.
+function _applySpecsContext(scoreBase, bugText, taskText, specsText) {
+  const safeScore = Math.max(0, Math.min(0.999, Number(scoreBase) || 0));
+  if (!specsText || !bugText || !taskText) {
+    return {
+      score: safeScore,
+      specSource: 0,
+      specTarget: 0
+    };
+  }
+
+  const specSource = _jaccard(bugText, specsText);
+  const specTarget = _jaccard(taskText, specsText);
+
+  const contextPenalty = Math.min(0.25, Math.max(specSource, specTarget) * 0.3);
+  const adjusted = Math.max(0, safeScore - contextPenalty);
+
+  return {
+    score: adjusted,
+    specSource,
+    specTarget
+  };
+}
+
+function _sharedSpecificityBoost(sourceText, targetText) {
+  try {
+    const tokensA = _tokenize(sourceText).filter(w => w.length > 3);
+    const tokensB = _tokenize(targetText).filter(w => w.length > 3);
+    if (tokensA.length < 4 || tokensB.length < 4) {
+      return { boost: 0, sharedBigrams: 0 };
+    }
+
+    const bigramsA = new Set();
+    for (let i = 0; i < tokensA.length - 1; i++) {
+      const bg = `${tokensA[i]} ${tokensA[i + 1]}`;
+      if (bg.length >= 7) bigramsA.add(bg);
+    }
+    if (!bigramsA.size) return { boost: 0, sharedBigrams: 0 };
+
+    let shared = 0;
+    const counted = new Set();
+    for (let i = 0; i < tokensB.length - 1; i++) {
+      const bg = `${tokensB[i]} ${tokensB[i + 1]}`;
+      if (bg.length < 7) continue;
+      if (bigramsA.has(bg) && !counted.has(bg)) {
+        counted.add(bg);
+        shared++;
+      }
+    }
+    if (!shared) return { boost: 0, sharedBigrams: 0 };
+
+    const boost = Math.min(0.2, shared * 0.045);
+    return { boost, sharedBigrams: shared };
+  } catch {
+    return { boost: 0, sharedBigrams: 0 };
+  }
 }
 
 /**
@@ -252,9 +300,23 @@ async function _embedOpenAI(apikey, texts) {
           if (pos === -1) return { id:t.id, key:t.key, score:0, _method:'embeddings' };
           const v = vectors[pos + 1] || [];
           const base = _cosineSim(bugVec, v);
-          // boost da specs
-          const boosted = _applySpecsBoost(base, bugText, t.text, specsText);
-          return { id:t.id, key:t.key, score: boosted, _method:'embeddings' };
+          const ctx = _applySpecsContext(base, bugText, t.text, specsText);
+          const specificity = _sharedSpecificityBoost(bugText, t.text);
+          const finalScore = Math.min(0.999, ctx.score + specificity.boost);
+          return {
+            id: t.id,
+            key: t.key,
+            score: finalScore,
+            _method: 'embeddings',
+            _specContext: {
+              source: ctx.specSource,
+              target: ctx.specTarget
+            },
+            _specificity: {
+              sharedBigrams: specificity.sharedBigrams,
+              boost: specificity.boost
+            }
+          };
         });
         raw.sort((a,b)=>b.score - a.score);
         return raw;
@@ -267,8 +329,24 @@ async function _embedOpenAI(apikey, texts) {
     // Fallback: Jaccard + boost specs
     const out = taskItems.map(t => {
       const base = _jaccard(bugText, t.text);
-      const boosted = _applySpecsBoost(base, bugText, t.text, specsText);
-      return { id:t.id, key:t.key, score:boosted, _method:'jaccard', _reason:fallbackReason };
+      const ctx = _applySpecsContext(base, bugText, t.text, specsText);
+      const specificity = _sharedSpecificityBoost(bugText, t.text);
+      const finalScore = Math.min(0.999, ctx.score + specificity.boost);
+      return {
+        id: t.id,
+        key: t.key,
+        score: finalScore,
+        _method: 'jaccard',
+        _reason: fallbackReason,
+        _specContext: {
+          source: ctx.specSource,
+          target: ctx.specTarget
+        },
+        _specificity: {
+          sharedBigrams: specificity.sharedBigrams,
+          boost: specificity.boost
+        }
+      };
     });
     out.sort((a,b)=>b.score - a.score);
       return out;
@@ -295,54 +373,53 @@ async function _embedOpenAI(apikey, texts) {
     // Fallback locale (se manca AI key o i testi sono vuoti)
     function localFallback() {
       const simSourceTarget = _jaccard(bugText, taskText);
-      const simSourceSpecs = specsText ? _jaccard(bugText, specsText) : 0;
-      const simTargetSpecs = specsText ? _jaccard(taskText, specsText) : 0;
+      const specSource = specsText ? _jaccard(bugText, specsText) : 0;
+      const specTarget = specsText ? _jaccard(taskText, specsText) : 0;
+      const ctx = _applySpecsContext(simSourceTarget, bugText, taskText, specsText);
+      const specificity = _sharedSpecificityBoost(bugText, taskText);
+      const adjusted = Math.max(0, ctx.score);
+      const boosted = Math.min(0.999, adjusted + specificity.boost);
 
       const fmt = v => `${(v * 100).toFixed(1)}%`;
       const livello = v => {
-        if (v >= 0.40) return 'alta';
-        if (v >= 0.20) return 'media';
-        if (v >= 0.10) return 'bassa';
-        return 'quasi nulla';
+        if (v >= 0.45) return 'muito alta';
+        if (v >= 0.25) return 'média';
+        if (v >= 0.12) return 'baixa';
+        return 'quase nula';
       };
 
-      const hasSpecs = specsText.trim().length > 0;
-      const avgTri = hasSpecs
-        ? (simSourceTarget + simSourceSpecs + simTargetSpecs) / 3
-        : simSourceTarget;
-
       let conclusione;
-      if (avgTri >= 0.40) {
-        conclusione = 'I tre elementi risultano fortemente collegati (stesso ambito funzionale).';
-      } else if (avgTri >= 0.20) {
-        conclusione = 'Collegamento plausibile ma non fortissimo: stesso tema generale, con differenze.';
-      } else if (avgTri >= 0.10) {
-        conclusione = 'Collegamento debole/parziale: ci sono solo alcuni punti di contatto.';
+      if (boosted >= 0.45) {
+        conclusione = 'Os dois elementos compartilham pontos específicos muito parecidos.';
+      } else if (boosted >= 0.25) {
+        conclusione = 'Semelhança parcial: algumas especificidades coincidem, outras divergem.';
+      } else if (boosted >= 0.12) {
+        conclusione = 'Conexão fraca: poucas especificidades em comum.';
       } else {
-        conclusione = 'Non emergono legami forti tra i tre testi.';
+        conclusione = 'Especificidades praticamente independentes.';
       }
 
-      const rigaSpecs = hasSpecs
+      const rigaSpecs = specsText.trim().length
         ? [
-            `${sourceLabel}–SPECs : ${fmt(simSourceSpecs)} (similarità ${livello(simSourceSpecs)})`,
-            `${targetLabel}–SPECs: ${fmt(simTargetSpecs)} (similarità ${livello(simTargetSpecs)})`
+            `Contexto vs ${sourceLabel}: ${fmt(specSource)} (apenas pano de fundo)`,
+            `Contexto vs ${targetLabel}: ${fmt(specTarget)}`
           ].join('\n')
-        : `Nessun testo SPEC disponibile per questo epic (non posso confrontare ${sourceLabel}/${targetLabel} con le SPECs).`;
+        : 'Nenhum texto de SPEC disponível para contextualizar.';
 
       const fallbackLine =
         (method === 'jaccard' && reason)
-          ? `\nNota tecnica: è stato usato un fallback lessicale (Jaccard) perché: ${reason}`
+          ? `\nNota técnica: foi usado fallback lexical (Jaccard) porque: ${reason}`
           : '';
 
       return [
-        `Triangolo ${sourceLabel}–${targetLabel}–SPEC (fallback locale senza OpenAI chat)`,
+        `${sourceLabel} ↔ ${targetLabel} (fallback local sem OpenAI)`,
         '',
-        `${sourceLabel}–${targetLabel} : ${fmt(simSourceTarget)} (similarità ${livello(simSourceTarget)})`,
+        `Similaridade específica ${sourceLabel}–${targetLabel}: ${fmt(boosted)} (nível ${livello(boosted)})`,
         rigaSpecs,
         '',
-        `Conclusione: ${conclusione}`,
+        `Conclusão: ${conclusione}`,
         '',
-        `Dettaglio link ${sourceLabel}–${targetLabel}: score AI = ${fmt(score)} (${method === 'embeddings' ? 'embeddings' : 'jaccard'}).${fallbackLine}`
+        `Score estimado = ${fmt(score)} (${method === 'embeddings' ? 'embeddings' : 'jaccard'}).${fallbackLine}`
       ].join('\n');
     }
 
@@ -365,53 +442,67 @@ async function _embedOpenAI(apikey, texts) {
     function buildPromptForTypes(sourceKind, targetKind) {
       const combinations = {
         'bug-task': {
-          system: `Confronta tre testi: SPEC di business, descrizione BUG e descrizione TASK. Analizza:
-1) Se il BUG rispetta/viola le SPEC;
-2) Se la TASK è allineata alle SPEC;
-3) Se BUG e TASK parlano dello stesso problema.`,
-          conclusion: 'fortemente collegati (stesso bug/fix)'
+          system: `Você tem três textos: SPEC de negócio (contexto), descrição do BUG e descrição da TASK.
+Objetivo: avaliar se BUG e TASK tratam do mesmo problema concreto.
+Passos:
+1) Resuma a especificidade do BUG (sintomas, causas, impactos).
+2) Resuma a especificidade da TASK (ações, soluções, entregas).
+3) Compare sobreposições e diferenças; cite as SPEC apenas como contexto quando necessário.`,
+          conclusion: 'fortemente conectados (mesmo bug/fix)'
         },
         'bug-story': {
-          system: `Confronta tre testi: SPEC di business, descrizione BUG e descrizione STORY. Analizza:
-1) Se il BUG impatta funzionalità descritte nella STORY;
-2) Se la STORY rispetta le SPEC;
-3) Se il BUG blocca o degrada la STORY.`,
-          conclusion: 'fortemente collegati (bug impatta story)'
+          system: `Você tem três textos: SPEC de negócio (contexto), descrição do BUG e descrição da STORY.
+Objetivo: verificar se o BUG interfere na funcionalidade descrita na STORY.
+Passos:
+1) Destaque os pontos específicos do BUG (gatilhos, área impactada).
+2) Resuma os comportamentos/resultados esperados da STORY.
+3) Avalie interseções e diferenças específicas; use as SPEC somente como apoio contextual.`,
+          conclusion: 'fortemente conectados (bug impacta story)'
         },
         'bug-test': {
-          system: `Confronta tre testi: SPEC di business, descrizione BUG e descrizione TEST. Analizza:
-1) Se il TEST rileva il BUG descritto;
-2) Se il TEST valida le SPEC;
-3) Se BUG e TEST sono correlati nella copertura.`,
-          conclusion: 'fortemente collegati (test copre bug)'
+          system: `Você tem três textos: SPEC de negócio (contexto), descrição do BUG e descrição do TEST.
+Objetivo: entender se o TEST cobre o cenário específico do BUG.
+Passos:
+1) Evidencie os detalhes do BUG (como reproduzir, erros observados).
+2) Evidencie os passos/assertivas específicas do TEST.
+3) Compare as partes que se alinham ou divergem, citando as SPEC apenas como pano de fundo.`,
+          conclusion: 'fortemente conectados (test cobre bug)'
         },
         'task-story': {
-          system: `Confronta tre testi: SPEC di business, descrizione TASK e descrizione STORY. Analizza:
-1) Se la TASK implementa la STORY;
-2) Se entrambe rispettano le SPEC;
-3) Se la TASK è un subtask della STORY.`,
-          conclusion: 'fortemente collegati (task implementa story)'
+          system: `Você tem três textos: SPEC de negócio (contexto), descrição da TASK e descrição da STORY.
+Objetivo: avaliar se a TASK concretiza a STORY.
+Passos:
+1) Resuma atividades e entregas específicas da TASK.
+2) Resuma os comportamentos/resultados específicos da STORY.
+3) Compare as especificidades, recorrendo às SPEC apenas para clarificar o contexto.`,
+          conclusion: 'fortemente conectados (task implementa story)'
         },
         'task-test': {
-          system: `Confronta tre testi: SPEC di business, descrizione TASK e descrizione TEST. Analizza:
-1) Se il TEST valida la TASK implementata;
-2) Se entrambe rispettano le SPEC;
-3) Se il TEST copre i requisiti della TASK.`,
-          conclusion: 'fortemente collegati (test valida task)'
+          system: `Você tem três textos: SPEC de negócio (contexto), descrição da TASK e descrição do TEST.
+Objetivo: confirmar se o TEST valida a TASK.
+Passos:
+1) Destaque o que a TASK realiza (etapas, soluções, outputs).
+2) Destaque o que o TEST verifica (passos, resultados esperados).
+3) Compare os elementos específicos que coincidem ou divergem; cite as SPEC somente como suporte.`,
+          conclusion: 'fortemente conectados (test valida task)'
         },
         'story-test': {
-          system: `Confronta tre testi: SPEC di business, descrizione STORY e descrizione TEST. Analizza:
-1) Se il TEST valida la STORY;
-2) Se entrambe rispettano le SPEC;
-3) Se il TEST copre i requisiti della STORY.`,
-          conclusion: 'fortemente collegati (test valida story)'
+          system: `Você tem três textos: SPEC de negócio (contexto), descrição da STORY e descrição do TEST.
+Objetivo: checar se o TEST realmente valida a STORY.
+Passos:
+1) Resuma a STORY com foco nos resultados específicos.
+2) Resuma o TEST enfatizando as verificações pontuais.
+3) Compare as especificidades e use as SPEC apenas como base contextual.`,
+          conclusion: 'fortemente conectados (test valida story)'
         },
         'default': {
-          system: `Confronta tre testi: SPEC di business, primo elemento e secondo elemento. Analizza:
-1) Come il primo elemento si relaziona alle SPEC;
-2) Come il secondo elemento si relaziona alle SPEC;
-3) Se i due elementi sono correlati tra loro.`,
-          conclusion: 'fortemente collegati (stesso contesto)'
+          system: `Você tem três textos: SPEC de negócio (contexto), primeiro elemento e segundo elemento.
+Objetivo: comparar as especificidades dos dois elementos dentro do mesmo contexto.
+Passos:
+1) Destaque as particularidades do primeiro elemento.
+2) Destaque as particularidades do segundo elemento.
+3) Compare convergências e divergências específicas; convide as SPEC somente quando necessário para enquadrar o cenário.`,
+          conclusion: 'fortemente conectados (mesmo contexto)'
         }
       };
       
@@ -430,30 +521,31 @@ async function _embedOpenAI(apikey, texts) {
           role: 'system',
           content: [
             promptConfig.system,
-            'Devi fare una comparazione TRIANGOLARE molto concisa, in italiano.',
-            'Regole:',
-            '- non inventare dettagli che non sono nei testi;',
-            '- niente papiri: massimo ~10 righe;',
-            '- struttura chiara e numerata;',
-            `- chiudi con una frase di conclusione secca (es. "${promptConfig.conclusion}", "collegati ma parziali", "quasi indipendenti").`
+            'Você deve fazer uma comparação concisa, em português.',
+            'Regras:',
+            '- não invente detalhes que não estejam nos textos;',
+            '- máximo de ~10 linhas para todo o resultado;',
+            '- organize o texto em tópicos numerados (1. especificidades do primeiro elemento, 2. especificidades do segundo, 3. comparação direta);',
+            '- use as SPEC apenas como contexto de apoio, não como argumento principal;',
+            `- encerre com uma frase curta de conclusão (ex.: "${promptConfig.conclusion}", "parcialmente conectados", "quase independentes").`
           ].join('\n')
         },
         {
           role: 'user',
           content: [
-            'Ecco i tre testi da confrontare.',
+            'Aqui estão os três textos para comparar.',
             '',
-            '=== SPEC (testo caricato da Confluence) ===',
+            '=== SPEC (contexto de referência, cite apenas se necessário) ===',
             specShort || '(nessuna SPEC disponibile per questo epic)',
             '',
-            `=== ${sourceLabel} (testo composito) ===`,
+            `=== ${sourceLabel} (concentre a análise nas suas especificidades) ===`,
             bugShort,
             '',
-            `=== ${targetLabel} (testo composito) ===`,
+            `=== ${targetLabel} (concentre a análise nas suas especificidades) ===`,
             taskShort,
             '',
-            `Score semantico ${sourceLabel}–${targetLabel} (0–1): ${score.toFixed(3)} (metodo: ${method})`,
-            reason ? `Nota tecnica: ${reason}` : ''
+            `Score semântico ${sourceLabel}–${targetLabel} (0–1): ${score.toFixed(3)} (método: ${method})`,
+            reason ? `Nota técnica: ${reason}` : ''
           ].join('\n')
         }
       ];

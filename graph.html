@@ -7,12 +7,109 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f7fa; overflow: hidden; }
-    .header { background: white; padding: 12px 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.1); display: flex; align-items: center; gap: 12px; }
+    .header { background: white; padding: 12px 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.1); display: flex; align-items: center; gap: 12px; position: relative; z-index: 3; }
     .header input { padding: 6px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; width: 150px; }
     .header button { padding: 6px 16px; background: #1976d2; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
     .header button:hover { background: #1565c0; }
     #status { color: #666; font-size: 14px; margin-left: auto; }
-    #canvas { width: 100vw; height: calc(100vh - 56px); }
+
+    .filters-panel {
+      position: absolute;
+      top: 56px;
+      left: 0;
+      width: 240px;
+      height: calc(100vh - 56px);
+      background: #ffffff;
+      box-shadow: 2px 0 12px rgba(15, 23, 42, 0.08);
+      border-right: 1px solid #e2e8f0;
+      display: flex;
+      flex-direction: column;
+      z-index: 2;
+    }
+    .filters-tabs {
+      display: flex;
+      border-bottom: 1px solid #e2e8f0;
+    }
+    .filters-tab {
+      flex: 1;
+      background: #f1f5f9;
+      color: #475569;
+      font-size: 13px;
+      font-weight: 600;
+      padding: 10px 0;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      border: none;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: background 0.2s, color 0.2s, border-bottom-color 0.2s;
+    }
+    .filters-tab:first-child { border-right: 1px solid #e2e8f0; }
+    .filters-tab:hover { background: #e2e8f0; }
+    .filters-tab.active {
+      background: #ffffff;
+      color: #2563eb;
+      border-bottom-color: #2563eb;
+    }
+    .filters-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px 20px;
+    }
+    .filters-pane { display: none; }
+    .filters-pane.active { display: block; }
+    .filters-group { display: flex; flex-direction: column; gap: 12px; }
+    .filters-summary {
+      font-size: 12px;
+      color: #64748b;
+      margin-bottom: 16px;
+      line-height: 1.4;
+    }
+    .filters-summary.warning { color: #dc2626; }
+    .filter-option {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 14px;
+      color: #334155;
+      cursor: pointer;
+      user-select: none;
+    }
+    .filter-option input[type="checkbox"] {
+      appearance: none;
+      width: 16px;
+      height: 16px;
+      border: 2px solid #cbd5f5;
+      border-radius: 50%;
+      background: #fff;
+      transition: all 0.15s ease;
+      position: relative;
+    }
+    .filter-option input[type="checkbox"]:checked {
+      border-color: #2563eb;
+      background: #2563eb;
+      box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+    }
+    .filter-option input[type="checkbox"]:checked::after {
+      content: '';
+      position: absolute;
+      top: 3px;
+      left: 3px;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #fff;
+    }
+    .filter-option span { flex: 1; }
+
+    #canvas {
+      position: absolute;
+      top: 56px;
+      left: 240px;
+      width: calc(100vw - 240px);
+      height: calc(100vh - 56px);
+    }
+
     .tooltip { position: absolute; padding: 8px 12px; background: rgba(0,0,0,0.85); color: white; border-radius: 4px; font-size: 12px; pointer-events: none; z-index: 1000; opacity: 0; transition: opacity 0.2s; max-width: 250px; }
     .tooltip strong { display: block; margin-bottom: 4px; }
     .tooltip em { color: #aaa; font-style: normal; font-size: 11px; }
@@ -25,6 +122,21 @@
     <p id="status">Select Epics in Actual Sprint</p>
     <button id="copyDebug" title="Copia info ultima chiamata API" style="margin-left:12px;background:#475569">Copia diagnostica</button>
   </div>
+  <aside class="filters-panel">
+    <div class="filters-tabs">
+      <button class="filters-tab active" data-tab="status">Status</button>
+      <button class="filters-tab" data-tab="type">Type</button>
+    </div>
+    <div class="filters-content">
+      <div id="filters-status" class="filters-pane active">
+        <p id="statusFilterSummary" class="filters-summary"></p>
+        <div id="statusFilterList"></div>
+      </div>
+      <div id="filters-type" class="filters-pane">
+        <p style="color:#94a3b8;font-size:13px;">(Nessun filtro disponibile)</p>
+      </div>
+    </div>
+  </aside>
   <svg id="canvas"></svg>
   <script src="vendor/d3.v7.min.js"></script>
   <script src="layout.js"></script>

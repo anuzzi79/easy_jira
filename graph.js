@@ -3,7 +3,8 @@ let CURRENT_AUTH_TOKEN = null; // usato per operazioni interattive (crea issue l
 let CURRENT_EPIC_KEY = null;  // epico attualmente caricato
 
 const epicSelect = document.getElementById('epicSelect');
-const runBtn = document.getElementById('run');
+const runBtn = document.getElementById('run'); // legacy (può essere nullo)
+const headerEl = document.querySelector('.header');
 const statusEl = document.getElementById('status');
 const viewSpecsBtn = document.getElementById('viewSpecs');
 const svg = d3.select('#canvas');
@@ -11,6 +12,65 @@ let lastApiDebug = null;
 
 // Buffer diagnostico SPECs (mostrato nel popup e copiabile)
 let specsDiag = [];
+let nodeContextMenuEl = null;
+let inspectBackdrop = null;
+let inspectModal = null;
+let inspectContentEl = null;
+let inspectCopyBtn = null;
+let similarityControlEl = null;
+let similaritySliderEl = null;
+let similarityValueEl = null;
+const DEFAULT_MIN_SCORE = 10;
+let displayThreshold = DEFAULT_MIN_SCORE;
+window.EJ_DISPLAY_THRESHOLD = displayThreshold;
+
+const STATUS_SEQUENCE = [
+  'TO DO',
+  'NEED REQS',
+  'BLOCKED',
+  'IN PROGRESS',
+  'CODE REVIEW',
+  'TESTING',
+  'QA',
+  'DONE',
+  'REGRESSION TEST',
+  'UAT',
+  'SKIP UAT',
+  'RELEASE CANDIDATE',
+  'RELEASE',
+  'CANCELLED'
+];
+
+const STATUS_LABEL_MAP = {
+  'TO DO': 'To Do',
+  'NEED REQS': 'Need Reqs',
+  'BLOCKED': 'Blocked',
+  'IN PROGRESS': 'In Progress',
+  'CODE REVIEW': 'Code Review',
+  'TESTING': 'Testing',
+  'QA': 'QA',
+  'DONE': 'Done',
+  'REGRESSION TEST': 'Regression Test',
+  'UAT': 'UAT',
+  'SKIP UAT': 'Skip UAT',
+  'RELEASE CANDIDATE': 'Release Candidate',
+  'RELEASE': 'Release',
+  'CANCELLED': 'Cancelled'
+};
+const STATUS_SPECIAL_OPTIONS = [
+  { key: '__ALL__', label: 'All' },
+  { key: '__NONE__', label: 'None' }
+];
+let activeStatusFilters = new Set(STATUS_SEQUENCE);
+const currentGraphState = {
+  nodeSelection: null,
+  labelSelection: null,
+  linkSelection: null,
+  nodesByKey: new Map(),
+  aiLayer: null,
+  nodes: [],
+  links: []
+};
 
 // Helper: accoda e mostra stato
 function logSpec(phase, msg, ok = true) {
@@ -41,6 +101,252 @@ function getCategoryFromIssueType(issuetypeName) {
 function setStatus(msg, ok = true) {
   statusEl.textContent = msg;
   statusEl.style.color = ok ? '#16a34a' : '#dc2626';
+}
+
+function ensureSimilarityControl() {
+  if (similarityControlEl) return;
+  const container = headerEl || (runBtn ? runBtn.parentElement : null);
+  if (!container) return;
+
+  const label = document.createElement('label');
+  label.id = 'similarityControl';
+  label.style.marginLeft = '12px';
+  label.style.display = 'none';
+  label.style.alignItems = 'center';
+  label.style.gap = '6px';
+
+  const textSpan = document.createElement('span');
+  textSpan.textContent = 'Similarità minima:';
+
+  const valueSpan = document.createElement('span');
+  valueSpan.id = 'similarityValue';
+  valueSpan.textContent = `${displayThreshold}%`;
+
+  const slider = document.createElement('input');
+  slider.id = 'similaritySlider';
+  slider.type = 'range';
+  slider.min = '1';
+  slider.max = '100';
+  slider.value = String(displayThreshold);
+  slider.style.cursor = 'pointer';
+
+  label.append(textSpan, valueSpan, slider);
+  if (statusEl && statusEl.parentElement === container) {
+    container.insertBefore(label, statusEl);
+  } else {
+    container.appendChild(label);
+  }
+
+  similarityControlEl = label;
+  similaritySliderEl = slider;
+  similarityValueEl = valueSpan;
+}
+
+function updateSimilarityControlVisibility(shouldShow) {
+  ensureSimilarityControl();
+  if (!similarityControlEl) return;
+  similarityControlEl.style.display = shouldShow ? 'inline-flex' : 'none';
+}
+
+function initSimilaritySlider() {
+  ensureSimilarityControl();
+  if (!similaritySliderEl || !similarityValueEl) return;
+
+  similaritySliderEl.value = String(displayThreshold);
+  similarityValueEl.textContent = `${displayThreshold}%`;
+
+  if (!similaritySliderEl.dataset.bound) {
+    similaritySliderEl.dataset.bound = '1';
+    similaritySliderEl.addEventListener('input', () => {
+      const val = Number(similaritySliderEl.value);
+      const clamped = Math.max(1, Math.min(100, val));
+      setDisplayThreshold(clamped);
+    });
+  }
+
+  updateSimilarityControlVisibility(false);
+}
+
+function setDisplayThreshold(percent, { updateSlider = true, triggerRedraw = true } = {}) {
+  const value = Math.max(1, Math.min(100, Number(percent) || DEFAULT_MIN_SCORE));
+  displayThreshold = value;
+  window.EJ_DISPLAY_THRESHOLD = value;
+
+  if (updateSlider && similaritySliderEl && similarityValueEl) {
+    similaritySliderEl.value = String(value);
+    similarityValueEl.textContent = `${value}%`;
+  }
+
+  if (triggerRedraw && typeof window.EJ_REDRAW_AI_LINKS === 'function') {
+    window.EJ_REDRAW_AI_LINKS(value / 100);
+  }
+}
+
+function initFilterTabs() {
+  const tabs = document.querySelectorAll('.filters-tab');
+  const panes = document.querySelectorAll('.filters-pane');
+  if (!tabs.length || !panes.length) return;
+
+  tabs.forEach(tab => {
+    if (tab.dataset.bound) return;
+    tab.dataset.bound = '1';
+    tab.addEventListener('click', () => {
+      const target = tab.dataset.tab;
+      tabs.forEach(t => t.classList.toggle('active', t === tab));
+      panes.forEach(pane => {
+        pane.classList.toggle('active', pane.id === `filters-${target}`);
+      });
+    });
+  });
+}
+
+function statusIsAllowed(statusName) {
+  if (!statusName) return true;
+  const normalized = normalizeStatusName(statusName);
+  if (!STATUS_SEQUENCE.includes(normalized)) return true;
+  return activeStatusFilters.has(normalized);
+}
+
+function syncStatusCheckboxStates() {
+  const container = document.getElementById('statusFilterList');
+  if (!container) return;
+  const inputs = container.querySelectorAll('input[data-status]');
+  inputs.forEach(input => {
+    const normalized = normalizeStatusName(input.dataset.status);
+    input.checked = activeStatusFilters.has(normalized);
+  });
+}
+
+function updateStatusSpecialCheckboxes() {
+  const container = document.getElementById('statusFilterList');
+  if (!container) return;
+  const allInput = container.querySelector('input[data-special="all"]');
+  const noneInput = container.querySelector('input[data-special="none"]');
+  if (allInput) allInput.checked = activeStatusFilters.size === STATUS_SEQUENCE.length;
+  if (noneInput) noneInput.checked = activeStatusFilters.size === 0;
+}
+
+function isNodeKeyVisible(key) {
+  if (!key) return true;
+  const node = currentGraphState.nodesByKey.get(key);
+  if (!node) return true;
+  return statusIsAllowed(node.status);
+}
+
+function applyStatusFilters() {
+  const summaryEl = document.getElementById('statusFilterSummary');
+  const totalNodes = Array.isArray(currentGraphState.nodes) ? currentGraphState.nodes.length : 0;
+  const visibleNodes = totalNodes
+    ? currentGraphState.nodes.filter(n => statusIsAllowed(n.status)).length
+    : 0;
+
+  if (summaryEl) {
+    if (!totalNodes) {
+      summaryEl.textContent = 'Carica un epico per applicare i filtri.';
+      summaryEl.classList.remove('warning');
+    } else if (visibleNodes === 0) {
+      summaryEl.textContent = 'Nessun nodo visibile con i filtri correnti.';
+      summaryEl.classList.add('warning');
+    } else if (visibleNodes === totalNodes) {
+      summaryEl.textContent = 'Mostrati tutti i nodi.';
+      summaryEl.classList.remove('warning');
+    } else {
+      summaryEl.textContent = `Mostrati ${visibleNodes} di ${totalNodes} nodi.`;
+      summaryEl.classList.remove('warning');
+    }
+  }
+
+  const nodeSel = currentGraphState.nodeSelection;
+  const labelSel = currentGraphState.labelSelection;
+  const linkSel = currentGraphState.linkSelection;
+  if (!nodeSel || !labelSel || !linkSel) {
+    updateStatusSpecialCheckboxes();
+    return;
+  }
+
+  nodeSel.style('display', d => statusIsAllowed(d.status) ? null : 'none');
+  labelSel.style('display', d => statusIsAllowed(d.status) ? null : 'none');
+
+  linkSel.style('display', d => {
+    const sid = typeof d.source === 'object' ? d.source.id : d.source;
+    const tid = typeof d.target === 'object' ? d.target.id : d.target;
+    return (isNodeKeyVisible(sid) && isNodeKeyVisible(tid)) ? null : 'none';
+  });
+
+  updateStatusSpecialCheckboxes();
+  if (typeof window.EJ_REDRAW_AI_LINKS === 'function') {
+    window.EJ_REDRAW_AI_LINKS();
+  }
+}
+
+function bindStatusFilterEvents() {
+  const container = document.getElementById('statusFilterList');
+  if (!container || container.dataset.eventsBound) return;
+  container.dataset.eventsBound = '1';
+
+  container.addEventListener('change', (event) => {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement)) return;
+    if (input.type !== 'checkbox') return;
+
+    const special = input.dataset.special;
+    if (special === 'all') {
+      activeStatusFilters = new Set(STATUS_SEQUENCE);
+      syncStatusCheckboxStates();
+    } else if (special === 'none') {
+      activeStatusFilters = new Set();
+      syncStatusCheckboxStates();
+    } else if (input.dataset.status) {
+      const normalized = normalizeStatusName(input.dataset.status);
+      if (input.checked) {
+        activeStatusFilters.add(normalized);
+      } else {
+        activeStatusFilters.delete(normalized);
+      }
+    }
+
+    updateStatusSpecialCheckboxes();
+    applyStatusFilters();
+  });
+}
+
+function buildStatusFilterOptions() {
+  const container = document.getElementById('statusFilterList');
+  if (!container || container.dataset.ready) return;
+  container.dataset.ready = '1';
+
+  const group = document.createElement('div');
+  group.className = 'filters-group';
+
+  const makeOption = (key, label, { checked = false, special = null } = {}) => {
+    const wrapper = document.createElement('label');
+    wrapper.className = 'filter-option';
+
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.value = key;
+    if (special) input.dataset.special = special;
+    else input.dataset.status = key;
+    input.checked = checked;
+
+    const text = document.createElement('span');
+    text.textContent = label;
+
+    wrapper.append(input, text);
+    group.appendChild(wrapper);
+  };
+
+  STATUS_SPECIAL_OPTIONS.forEach(opt => {
+    makeOption(opt.key, opt.label, { checked: false, special: opt.key === '__ALL__' ? 'all' : 'none' });
+  });
+
+  STATUS_SEQUENCE.forEach(status => {
+    makeOption(status, STATUS_LABEL_MAP[status] || status, { checked: true });
+  });
+
+  container.appendChild(group);
+  syncStatusCheckboxStates();
+  updateStatusSpecialCheckboxes();
 }
 
 function normalizeEpicKey(k) {
@@ -865,6 +1171,22 @@ function ensureContextUi() {
       .ej-modal h3 { margin: 0 0 10px 0; font-size: 18px; }
       .ej-modal pre { white-space: pre-wrap; word-wrap: break-word; background: #f8fafc; padding: 12px; border-radius: 8px; font-size: 13px; border: 1px solid #e5e7eb; }
       .ej-close { display: inline-block; margin-top: 12px; background: #111827; color: #fff; border: 0; border-radius: 6px; padding: 8px 12px; cursor: pointer; font-size: 14px;}
+      .ej-specs-log { background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px; max-height: 180px; overflow: auto; font-size: 12px; }
+      .ej-spec-entry { margin: 8px 0; border: 1px solid #e5e7eb; border-radius: 8px; padding: 6px 10px; background: #f9fafb; }
+      .ej-spec-entry summary { cursor: pointer; font-weight: 600; outline: none; }
+      .ej-spec-entry pre { margin: 8px 0 0 0; }
+      .ej-specs-failed { margin: 4px 0 0 0; padding-left: 20px; font-size: 13px; color: #b91c1c; }
+      .ej-node-menu { position: fixed; z-index: 10001; background: #111827; color: #fff; border-radius: 8px; padding: 8px; box-shadow: 0 10px 24px rgba(0,0,0,0.25); display: none; min-width: 160px; font-size: 13px; }
+      .ej-node-menu button { width: 100%; padding: 6px 10px; border: none; background: transparent; color: inherit; text-align: left; border-radius: 6px; cursor: pointer; }
+      .ej-node-menu button:hover { background: rgba(255,255,255,0.12); }
+      .ej-inspect-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.35); z-index: 10002; display: none; }
+      .ej-inspect-modal { position: fixed; z-index: 10003; background: #fff; border-radius: 10px; box-shadow: 0 12px 40px rgba(0,0,0,0.25); width: min(620px, 90vw); max-height: 80vh; overflow: hidden; padding: 16px; top: 50%; left: 50%; transform: translate(-50%, -50%); font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; display: none; }
+      .ej-inspect-modal h3 { margin: 0 0 10px 0; font-size: 18px; }
+      .ej-inspect-body { overflow: auto; max-height: 56vh; border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; background: #f8fafc; font-size: 13px; white-space: pre-wrap; }
+      .ej-inspect-actions { margin-top: 12px; display: flex; gap: 8px; justify-content: flex-end; }
+      .ej-btn { padding: 6px 12px; border-radius: 6px; border: 1px solid transparent; font-size: 14px; cursor: pointer; }
+      .ej-btn-primary { background: #1d4ed8; color: #fff; }
+      .ej-btn-secondary { background: #e5e7eb; color: #111827; }
     `;
     document.head.appendChild(style);
   }
@@ -897,6 +1219,65 @@ function ensureContextUi() {
     document.getElementById('ej-ai-close').addEventListener('click', hideModal);
     document.getElementById('ej-ai-backdrop').addEventListener('click', hideModal);
   }
+  if (!document.getElementById('ej-node-menu')) {
+    nodeContextMenuEl = document.createElement('div');
+    nodeContextMenuEl.id = 'ej-node-menu';
+    nodeContextMenuEl.className = 'ej-node-menu';
+    nodeContextMenuEl.innerHTML = `
+      <button id="ej-node-inspect-btn">Inspect node</button>
+      <button id="ej-node-search-btn">Search connection</button>
+    `;
+    nodeContextMenuEl.style.display = 'none';
+    document.body.appendChild(nodeContextMenuEl);
+  } else {
+    nodeContextMenuEl = document.getElementById('ej-node-menu');
+  }
+  if (!document.getElementById('ej-inspect-backdrop')) {
+    inspectBackdrop = document.createElement('div');
+    inspectBackdrop.id = 'ej-inspect-backdrop';
+    inspectBackdrop.className = 'ej-inspect-backdrop';
+    document.body.appendChild(inspectBackdrop);
+  } else {
+    inspectBackdrop = document.getElementById('ej-inspect-backdrop');
+  }
+  if (!document.getElementById('ej-inspect-modal')) {
+    inspectModal = document.createElement('div');
+    inspectModal.id = 'ej-inspect-modal';
+    inspectModal.className = 'ej-inspect-modal';
+    inspectModal.innerHTML = `
+      <h3 id="ej-inspect-title">Inspect node</h3>
+      <div class="ej-inspect-body" id="ej-inspect-content">(caricamento…)</div>
+      <div class="ej-inspect-actions">
+        <button class="ej-btn ej-btn-secondary" id="ej-inspect-close">Chiudi</button>
+        <button class="ej-btn ej-btn-primary" id="ej-inspect-copy">Copia</button>
+      </div>
+    `;
+    inspectModal.style.display = 'none';
+    document.body.appendChild(inspectModal);
+    inspectContentEl = document.getElementById('ej-inspect-content');
+    inspectCopyBtn = document.getElementById('ej-inspect-copy');
+    const closeBtn = document.getElementById('ej-inspect-close');
+    const closeInspect = () => {
+      inspectModal.style.display = 'none';
+      inspectBackdrop.style.display = 'none';
+    };
+    closeBtn.addEventListener('click', closeInspect);
+    inspectBackdrop.addEventListener('click', closeInspect);
+    inspectCopyBtn.addEventListener('click', async () => {
+      if (!inspectContentEl) return;
+      try {
+        await navigator.clipboard.writeText(inspectContentEl.textContent || '');
+        setStatus('Dettagli nodo copiati negli appunti.', true);
+      } catch (err) {
+        console.error('Clipboard error', err);
+        setStatus('Impossibile copiare negli appunti.', false);
+      }
+    });
+  } else {
+    inspectModal = document.getElementById('ej-inspect-modal');
+    inspectContentEl = document.getElementById('ej-inspect-content');
+    inspectCopyBtn = document.getElementById('ej-inspect-copy');
+  }
 }
 
 function showModal(text) {
@@ -916,6 +1297,95 @@ function hideModal() {
   document.getElementById('ej-ai-modal').style.display = 'none';
 }
 // ===== fine UI =====
+
+function hideNodeContextMenu() {
+  if (nodeContextMenuEl) {
+    nodeContextMenuEl.style.display = 'none';
+    nodeContextMenuEl.dataset.key = '';
+  }
+}
+
+function showNodeContextMenu(event, nodeData, onInspect, onSearch) {
+  ensureContextUi();
+  if (!nodeContextMenuEl) return;
+  const { clientX, clientY } = event;
+  nodeContextMenuEl.style.display = 'block';
+  nodeContextMenuEl.style.left = `${clientX + 6}px`;
+  nodeContextMenuEl.style.top = `${clientY + 6}px`;
+  nodeContextMenuEl.dataset.key = nodeData?.key || '';
+
+  const inspectBtn = document.getElementById('ej-node-inspect-btn');
+  const searchBtn = document.getElementById('ej-node-search-btn');
+  const hideLater = () => hideNodeContextMenu();
+  document.addEventListener('click', hideLater, { once: true });
+
+  if (inspectBtn) {
+    inspectBtn.onclick = (e) => {
+      e.stopPropagation();
+      hideNodeContextMenu();
+      onInspect?.(nodeData);
+    };
+  }
+  if (searchBtn) {
+    searchBtn.onclick = (e) => {
+      e.stopPropagation();
+      hideNodeContextMenu();
+      onSearch?.(nodeData);
+    };
+  }
+}
+
+async function inspectNodeDetails(nodeData) {
+  try {
+    ensureContextUi();
+    if (!inspectModal || !inspectContentEl) return;
+    const token = CURRENT_AUTH_TOKEN || (await getCreds()).token;
+    const raw = await jiraGetIssueRaw(token, nodeData.key);
+
+    const category = String(nodeData.category || '').toLowerCase();
+    let kind = 'task';
+    if (category === 'bug' || category === 'mobile_bug') kind = 'bug';
+    else if (category === 'story') kind = 'story';
+    else if (category === 'test') kind = 'test';
+
+    const fields = buildCompositeFields(raw, kind);
+    const summary = raw.fields?.summary || nodeData.summary || '';
+    const description = buildCompositeTextFromRaw(raw, kind);
+    const status = raw.fields?.status?.name || nodeData.status || '';
+    const assignee = raw.fields?.assignee?.displayName || nodeData.assignee || '';
+
+    const lines = [
+      `Key: ${nodeData.key}`,
+      `Issuetype: ${raw.fields?.issuetype?.name || nodeData.issuetype || ''}`,
+      `Status: ${status}`,
+      `Assignee: ${assignee}`,
+      `Summary: ${summary}`,
+      `Category: ${category}`
+    ];
+
+    if (description) {
+      lines.push('', 'Description:', description.trim());
+    }
+
+    const compositeEntries = Object.entries(fields || {});
+    if (compositeEntries.length) {
+      lines.push('', 'Dettagli:');
+      compositeEntries.forEach(([key, value]) => {
+        lines.push(`${key}: ${value}`);
+      });
+    }
+
+    const finalText = lines.join('\n');
+    const titleEl = document.getElementById('ej-inspect-title');
+    if (titleEl) titleEl.textContent = `Inspect ${nodeData.key}`;
+    inspectContentEl.textContent = finalText || '(nessun dato disponibile)';
+    inspectBackdrop.style.display = 'block';
+    inspectModal.style.display = 'block';
+  } catch (err) {
+    console.error('Inspect node error', err);
+    setStatus(`Inspect node: ${err.message || err}`, false);
+  }
+}
 
 function renderForceGraph(nodes, links, epicKey, groups = { hierLinks: [], relLinks: [] }) {
   const svgNode = svg.node();
@@ -1392,6 +1862,7 @@ ${exp}
   }
 
   async function handleNodeContextMenu(event, d) {
+    let escListener = null;
     try {
       cancelAiReveal();
 
@@ -1403,6 +1874,8 @@ ${exp}
         setStatus('AI-link: funziona su Bug, Task, Story e Test (esclusi Epic, Test Execution, Subtask).', false);
         return;
       }
+
+      setDisplayThreshold(DEFAULT_MIN_SCORE, { updateSlider: true, triggerRedraw: false });
 
       const token = CURRENT_AUTH_TOKEN;
       const sourceKey = d.key;
@@ -1454,8 +1927,8 @@ ${exp}
       console.log(`[AI-link] Nodi candidati per categoria: ${catSummary}`);
 
       // Soglie / limiti (embeddings come filtro)
-      const TOP_N = 20; // aumentato per più risultati cross-category
-      const MIN_SCORE = 0.60; // 60% soglia per match di qualità
+      const TOP_N = Infinity;
+      const SEARCH_THRESHOLD = DEFAULT_MIN_SCORE / 100;
       const CONCURRENCY = 1; // valutazione davvero sequenziale (un nodo alla volta)
 
       // Pulizia stato AI precedente
@@ -1463,6 +1936,7 @@ ${exp}
       aiTempLinks = [];
       aiLayer.selectAll('line.ai').remove();
       aiExplainMap.clear();
+      updateSimilarityControlVisibility(false);
 
       const targetKeys = targetNodes.map(n => n.key);
       const targetRawMap = new Map();
@@ -1489,6 +1963,15 @@ ${exp}
       let cancelled = false;
       let processed = 0;
       const total = targetKeys.length;
+
+      escListener = (ev) => {
+        if (ev.key === 'Escape') {
+          cancelled = true;
+          queue.length = 0;
+          setStatus('AI-link: ricerca annullata (ESC).', false);
+        }
+      };
+      document.addEventListener('keydown', escListener, { once: false });
       
       // Contatori diagnostici
       let skippedNoDescription = 0;
@@ -1575,7 +2058,7 @@ ${exp}
 
           if (cancelled) return;
           const s = quick && quick[0];
-          if (!s || s.score < MIN_SCORE) {
+          if (!s || s.score < SEARCH_THRESHOLD) {
             skippedLowScore++;
             return;
           }
@@ -1634,11 +2117,11 @@ ${exp}
 
       // Log diagnostico finale
       console.log(`[AI-link] Risultati: ${accepted} match accettati, ${processed} nodi processati`);
-      console.log(`[AI-link] Filtrati: ${skippedNoDescription} senza description, ${skippedShortText} testo corto, ${skippedLowScore} score basso (<${Math.round(MIN_SCORE * 100)}%)`);
+      console.log(`[AI-link] Filtrati: ${skippedNoDescription} senza description, ${skippedShortText} testo corto, ${skippedLowScore} score basso (<${DEFAULT_MIN_SCORE}%)`);
 
       if (accepted === 0) {
         setStatus(
-          `AI-link: nessuna corrispondenza ≥ ${Math.round(MIN_SCORE * 100)}% con embeddings.`,
+          `AI-link: nessuna corrispondenza ≥ ${DEFAULT_MIN_SCORE}% con embeddings.`,
           false
         );
       }
@@ -1646,13 +2129,33 @@ ${exp}
     } catch (e) {
       console.error('AI-link error', e);
       setStatus(`AI-link: errore ${e.message || e}`, false);
+    } finally {
+      if (escListener) {
+        document.removeEventListener('keydown', escListener);
+      }
     }
   }
 
+  const getCurrentThreshold = () => {
+    const percent = Math.max(1, Math.min(100, Number(displayThreshold) || DEFAULT_MIN_SCORE));
+    return percent / 100;
+  };
+
   // Ridisegna i link rossi a partire da aiTempLinks (gradiente per score)
-  function drawAiLinks() {
-    // nessun link → svuota e basta
+  function drawAiLinks(customThreshold) {
+    updateSimilarityControlVisibility(aiTempLinks.length > 0);
     if (!aiTempLinks.length) {
+      aiLayer.selectAll('line.ai').remove();
+      return;
+    }
+
+    const threshold = typeof customThreshold === 'number' ? customThreshold : getCurrentThreshold();
+    const visibleLinks = aiTempLinks.filter(l => {
+      if (l.score < threshold) return false;
+      return isNodeKeyVisible(l.source) && isNodeKeyVisible(l.target);
+    });
+
+    if (!visibleLinks.length) {
       aiLayer.selectAll('line.ai').remove();
       return;
     }
@@ -1698,7 +2201,7 @@ ${exp}
     aiLayer.selectAll('title').remove();
 
     const sel = aiLayer.selectAll('line.ai')
-      .data(aiTempLinks, d => `${d.source}->${d.target}`);
+      .data(visibleLinks, d => `${d.source}->${d.target}`);
 
     const enter = sel.enter()
       .append('line')
@@ -1764,6 +2267,11 @@ ${exp}
 
   node.on('mousedown', startLink);
 
+  window.EJ_REDRAW_AI_LINKS = (threshold) => {
+    const t = typeof threshold === 'number' ? threshold : getCurrentThreshold();
+    drawAiLinks(t);
+  };
+
   node.each(function(d) {
     const g = d3.select(this);
     const R = d.id === epicKey ? 10 : 7;
@@ -1808,10 +2316,19 @@ ${exp}
     }
   });
 
-  // Click destro: calcola similarità con altri nodi e disegna link rossi temporanei
+  // Click destro: mostra menu contestuale (inspect / search)
   node.on('contextmenu', (event, d) => {
     event.preventDefault();
-    handleNodeContextMenu(event, d);
+    showNodeContextMenu(
+      event,
+      d,
+      (nodeData) => {
+        inspectNodeDetails(nodeData);
+      },
+      (nodeData) => {
+        handleNodeContextMenu(event, nodeData);
+      }
+    );
   });
 
   const label = stage.append('g')
@@ -1824,6 +2341,20 @@ ${exp}
       .attr('text-anchor', 'middle')
       .attr('dy', 0)
       .attr('pointer-events', 'none');
+
+  currentGraphState.nodeSelection = node;
+  currentGraphState.labelSelection = label;
+  currentGraphState.linkSelection = link;
+  currentGraphState.aiLayer = aiLayer;
+  currentGraphState.nodes = nodes;
+  currentGraphState.links = links;
+  const nodesMap = new Map();
+  nodes.forEach(n => {
+    nodesMap.set(n.id, n);
+    nodesMap.set(n.key, n);
+  });
+  currentGraphState.nodesByKey = nodesMap;
+  applyStatusFilters();
 
   tooltip = d3.select('body').append('div')
     .attr('class', 'tooltip')
@@ -1869,6 +2400,7 @@ ${exp}
     aiTempLinks = [];
     aiExplainMap.clear();
     aiLayer.selectAll('line.ai').remove();
+    updateSimilarityControlVisibility(false);
     setStatus('AI-link temporanei rimossi.');
   });
 
@@ -2229,6 +2761,82 @@ async function fetchSingleDescription(token, key) {
     setStatus('Impossibile caricare gli epici della sprint attiva. Verifica credenziali.', false);
   }
 
+  function buildSpecEntries(meta) {
+    if (!meta || !meta.text) return [];
+    const sections = String(meta.text)
+      .split(/\n\n-----\n\n/)
+      .filter(Boolean);
+    return sections.map(section => {
+      const match = section.match(/^\[\[URL:(.+?)\]\]\n([\s\S]*)$/);
+      return {
+        url: match ? match[1] : 'URL non disponibile',
+        text: match ? match[2] : section
+      };
+    });
+  }
+
+  function renderSpecsDebugModal() {
+    const currentEpic = CURRENT_EPIC_KEY || epicSelect?.value || '';
+    const meta = (window.EJ_SPECS_CACHE && currentEpic) ? window.EJ_SPECS_CACHE[currentEpic] : null;
+
+    ensureContextUi();
+    const titleEl = document.querySelector('#ej-ai-modal h3');
+    const preEl = document.getElementById('ej-ai-modal-text');
+
+    if (!meta) {
+      if (titleEl) titleEl.textContent = `Specs – ${currentEpic || '(n/d)'}`;
+      if (preEl) preEl.textContent = 'Nessuna informazione sulle SPEC disponibile per questo epico.';
+      document.getElementById('ej-ai-backdrop').style.display = 'block';
+      document.getElementById('ej-ai-modal').style.display = 'block';
+      return;
+    }
+
+    const entries = buildSpecEntries(meta);
+    const failures = Array.isArray(meta.failures) ? meta.failures : [];
+
+    const logsHtml = meta.log?.length
+      ? meta.log.map(line => escapeHtml(line)).join('<br>')
+      : '(nessun log disponibile)';
+
+    const successHtml = entries.length
+      ? entries.map(entry => (
+          `<details class="ej-spec-entry">
+            <summary>${escapeHtml(entry.url)}</summary>
+            <pre>${escapeHtml(entry.text)}</pre>
+          </details>`
+        )).join('\n')
+      : '(nessuna SPEC caricata)';
+
+    const failuresHtml = failures.length
+      ? failures.map(f => `<li>${escapeHtml(f.url || 'URL sconosciuto')} — ${escapeHtml(f.error || 'errore sconosciuto')}</li>`).join('')
+      : '(nessuna SPEC fallita)';
+
+    const body = `
+      <h4>Epico: ${escapeHtml(currentEpic || '(n/d)')}</h4>
+      <p>SPEC trovate: ${entries.length} — Successi: ${meta.success || 0} — Fallite: ${meta.failed || 0}</p>
+      <h4>Log</h4>
+      <div class="ej-specs-log">${logsHtml}</div>
+      <h4>SPEC caricate</h4>
+      <div class="ej-specs-success">${successHtml}</div>
+      <h4>SPEC fallite</h4>
+      <ul class="ej-specs-failed">${failuresHtml}</ul>
+    `;
+
+    if (titleEl) titleEl.textContent = `Specs – ${currentEpic || '(n/d)'}`;
+    if (preEl) {
+      preEl.innerHTML = body;
+    }
+    document.getElementById('ej-ai-backdrop').style.display = 'block';
+    document.getElementById('ej-ai-modal').style.display = 'block';
+  }
+
+  initSimilaritySlider();
+  initFilterTabs();
+  buildStatusFilterOptions();
+  bindStatusFilterEvents();
+  updateStatusSpecialCheckboxes();
+  applyStatusFilters();
+
   const copyBtn = document.getElementById('copyDebug');
   const openSettingsBtn = document.getElementById('openSettings');
   openSettingsBtn?.addEventListener('click', () => chrome.runtime.openOptionsPage());
@@ -2243,6 +2851,21 @@ async function fetchSingleDescription(token, key) {
       setStatus('Impossibile copiare negli appunti.', false);
     }
   });
+
+  // Pulsante "Specs" accanto a "Copia diagnostica"
+  if (copyBtn?.parentElement) {
+    let specsBtn = document.getElementById('specsDebug');
+    if (!specsBtn) {
+      specsBtn = document.createElement('button');
+      specsBtn.id = 'specsDebug';
+      specsBtn.type = 'button';
+      specsBtn.textContent = 'Specs';
+      specsBtn.style.marginLeft = '8px';
+      specsBtn.className = copyBtn.className || '';
+      copyBtn.parentElement.insertBefore(specsBtn, copyBtn.nextSibling);
+    }
+    specsBtn.addEventListener('click', renderSpecsDebugModal);
+  }
 
   viewSpecsBtn?.addEventListener('click', () => {
     // Recupera testo SPECs dalla cache dell'epico selezionato
