@@ -119,6 +119,15 @@
       pointer-events: none;
       z-index: 5;
     }
+    .status-curtain {
+      position: absolute;
+      left: 0;
+      right: -16px;
+      background: rgba(148, 163, 184, 0.18);
+      border-radius: 12px;
+      pointer-events: none;
+      z-index: 1;
+    }
     .status-cursor-line {
       position: absolute;
       left: 0;
@@ -126,6 +135,7 @@
       height: 1px;
       background: rgba(15, 23, 42, 0.35);
       pointer-events: none;
+      z-index: 2;
     }
     .status-cursor-handle {
       position: absolute;
@@ -148,15 +158,13 @@
       cursor: ns-resize;
       user-select: none;
       pointer-events: auto;
+      z-index: 3;
     }
     #statusFilterList {
       position: relative;
     }
     #statusFilterList .status-cursor-overlay {
       pointer-events: none;
-    }
-    #statusCursorHandle {
-      pointer-events: auto;
     }
   </style>
 </head>
@@ -177,8 +185,10 @@
         <p id="statusFilterSummary" class="filters-summary"></p>
         <div id="statusFilterList">
           <div class="status-cursor-overlay" id="statusCursorOverlay">
+            <div class="status-curtain" id="statusCursorCurtainStart"></div>
             <div class="status-cursor-line" id="statusCursorLineStart"></div>
             <div class="status-cursor-handle" id="statusCursorHandleStart" tabindex="0" aria-label="Spostare From Here">From here</div>
+            <div class="status-curtain" id="statusCursorCurtainEnd"></div>
             <div class="status-cursor-line" id="statusCursorLineEnd"></div>
             <div class="status-cursor-handle" id="statusCursorHandleEnd" tabindex="0" aria-label="Spostare To Here">To here</div>
           </div>

@@ -82,10 +82,12 @@ function logSpec(phase, msg, ok = true) {
 let width, height, simulation, tooltip;
 
 class StatusCursor {
-  constructor({ list, line, handle, onMove }) {
+  constructor({ list, line, handle, curtain, mode = 'from', onMove }) {
     this.list = list;
     this.line = line;
     this.handle = handle;
+    this.curtain = curtain;
+    this.mode = mode;
     this.onMove = onMove;
     this.items = [];
     this.metrics = [];
@@ -94,6 +96,8 @@ class StatusCursor {
     this.minLimit = null;
     this.maxLimit = null;
     this.limitStrategy = null;
+    this.originTop = null;
+    this.originBottom = null;
   }
 
   mount() {
@@ -131,6 +135,8 @@ class StatusCursor {
       this.minLimit = Number.isFinite(limits.min) ? limits.min : null;
       this.maxLimit = Number.isFinite(limits.max) ? limits.max : null;
     }
+    if (this.minLimit != null) this.originTop = this.minLimit;
+    if (this.maxLimit != null) this.originBottom = this.maxLimit;
     if (this.position == null) {
       this.position = this.metrics[0].center;
     }
@@ -202,8 +208,26 @@ class StatusCursor {
     if (this.position == null) return;
     if (this.line) this.line.style.top = `${this.position}px`;
     if (this.handle) this.handle.style.top = `${this.position}px`;
+    if (this.curtain) this._applyCurtain();
     if (typeof this.onMove === 'function') {
       this.onMove(this.position, this);
+    }
+  }
+
+  _applyCurtain() {
+    if (!this.curtain) return;
+    const mode = this.mode;
+    if (mode === 'from') {
+      const origin = this.originTop != null ? this.originTop : (this.metrics[0]?.top ?? 0);
+      const height = Math.max(0, this.position - origin);
+      this.curtain.style.top = `${origin}px`;
+      this.curtain.style.height = `${height}px`;
+    } else if (mode === 'to') {
+      const origin = this.originBottom != null ? this.originBottom : (this.metrics[this.metrics.length - 1]?.top ?? this.position);
+      const top = this.position;
+      const height = Math.max(0, origin - top);
+      this.curtain.style.top = `${top}px`;
+      this.curtain.style.height = `${height}px`;
     }
   }
 
@@ -563,8 +587,10 @@ function buildStatusFilterOptions() {
   });
 
   const overlay = document.getElementById('statusCursorOverlay');
+  const curtainStart = document.getElementById('statusCursorCurtainStart');
   const lineStart = document.getElementById('statusCursorLineStart');
   const handleStart = document.getElementById('statusCursorHandleStart');
+  const curtainEnd = document.getElementById('statusCursorCurtainEnd');
   const lineEnd = document.getElementById('statusCursorLineEnd');
   const handleEnd = document.getElementById('statusCursorHandleEnd');
 
@@ -577,6 +603,8 @@ function buildStatusFilterOptions() {
       list: container,
       line: lineStart,
       handle: handleStart,
+      curtain: curtainStart,
+      mode: 'from',
       onMove: (_, cursor) => ensureCursorOrder(cursor)
     });
     statusCursorStart.mount();
@@ -589,6 +617,8 @@ function buildStatusFilterOptions() {
       list: container,
       line: lineEnd,
       handle: handleEnd,
+      curtain: curtainEnd,
+      mode: 'to',
       onMove: (_, cursor) => ensureCursorOrder(cursor)
     });
     statusCursorEnd.mount();
