@@ -62,6 +62,7 @@ const STATUS_SPECIAL_OPTIONS = [
   { key: '__NONE__', label: 'None' }
 ];
 let activeStatusFilters = new Set(STATUS_SEQUENCE);
+let statusCursorController = null;
 const currentGraphState = {
   nodeSelection: null,
   labelSelection: null,
@@ -80,6 +81,147 @@ function logSpec(phase, msg, ok = true) {
 }
 
 let width, height, simulation, tooltip;
+
+class StatusCursor {
+  constructor({ list, line, handle }) {
+    this.list = list;
+    this.line = line;
+    this.handle = handle;
+    this.items = [];
+    this.metrics = [];
+    this.position = null;
+    this._mounted = false;
+  }
+
+  mount() {
+    if (this._mounted) return;
+    if (!this.list || !this.line || !this.handle) return;
+    this._mounted = true;
+    this._bindHandlers();
+    this.refresh();
+    this.handle.addEventListener('pointerdown', this._onPointerDown);
+    this.handle.addEventListener('keydown', this._onKeyDown);
+    if (this._scrollContainer) {
+      this._scrollContainer.addEventListener('scroll', this._onScroll, { passive: true });
+    }
+    window.addEventListener('resize', this._onResize);
+  }
+
+  destroy() {
+    if (!this._mounted) return;
+    this._mounted = false;
+    this.handle.removeEventListener('pointerdown', this._onPointerDown);
+    this.handle.removeEventListener('keydown', this._onKeyDown);
+    if (this._scrollContainer) {
+      this._scrollContainer.removeEventListener('scroll', this._onScroll);
+    }
+    window.removeEventListener('resize', this._onResize);
+  }
+
+  refresh() {
+    if (!this.list) return;
+    this._cacheItems();
+    this._measure();
+    if (!this.metrics.length) return;
+    if (this.position == null) {
+      this.position = this.metrics[0].center;
+    }
+    this.position = this._clampPosition(this.position);
+    this._apply();
+  }
+
+  setPositionFromIndex(idx) {
+    if (!this.metrics.length) return;
+    const clamped = Math.max(0, Math.min(idx, this.metrics.length - 1));
+    this.position = this.metrics[clamped].center;
+    this._apply();
+  }
+
+  setPosition(y) {
+    if (!this.metrics.length) return;
+    this.position = this._clampPosition(y);
+    this._apply();
+  }
+
+  _bindHandlers() {
+    this._scrollContainer = this.list.closest('.filters-content') || this.list;
+    this._onScroll = () => this.refresh();
+    this._onResize = () => this.refresh();
+    this._onPointerDown = event => this._handlePointerDown(event);
+    this._onKeyDown = event => this._handleKeyDown(event);
+  }
+
+  _cacheItems() {
+    this.items = Array.from(this.list.querySelectorAll('.filter-option'));
+  }
+
+  _measure() {
+    const scroll = this.list.scrollTop;
+    this.metrics = this.items.map(el => {
+      const top = el.offsetTop - scroll;
+      const height = el.offsetHeight;
+      return { top, height, center: top + height / 2 };
+    });
+  }
+
+  _apply() {
+    if (this.position == null) return;
+    if (this.line) this.line.style.top = `${this.position}px`;
+    if (this.handle) this.handle.style.top = `${this.position}px`;
+  }
+
+  _clampPosition(y) {
+    if (!this.metrics.length) return 0;
+    const first = this.metrics[0];
+    const last = this.metrics[this.metrics.length - 1];
+    const min = first.top;
+    const max = last.top + last.height;
+    return Math.max(min, Math.min(max, y));
+  }
+
+  _nearestIndex(y) {
+    if (!this.metrics.length) return 0;
+    let best = 0;
+    let bestDist = Infinity;
+    this.metrics.forEach((metric, idx) => {
+      const dist = Math.abs(y - metric.center);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = idx;
+      }
+    });
+    return best;
+  }
+
+  _handlePointerDown(event) {
+    event.preventDefault();
+    const pointerId = event.pointerId;
+    this.handle.setPointerCapture(pointerId);
+    const move = ev => {
+      const rect = this.list.getBoundingClientRect();
+      const y = ev.clientY - rect.top + this.list.scrollTop;
+      this.setPosition(y);
+    };
+    const up = () => {
+      this.handle.releasePointerCapture(pointerId);
+      this.handle.removeEventListener('pointermove', move);
+      this.handle.removeEventListener('pointerup', up);
+      this.handle.removeEventListener('pointercancel', up);
+    };
+    this.handle.addEventListener('pointermove', move);
+    this.handle.addEventListener('pointerup', up);
+    this.handle.addEventListener('pointercancel', up);
+  }
+
+  _handleKeyDown(event) {
+    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+    event.preventDefault();
+    const step = 12;
+    const delta = event.key === 'ArrowUp' ? -step : step;
+    const next = (this.position == null ? 0 : this.position) + delta;
+    this.setPosition(next);
+  }
+}
 
 // Cache SPECs per epico (vive solo finché la pagina è aperta)
 window.EJ_SPECS_CACHE = window.EJ_SPECS_CACHE || {};
@@ -347,6 +489,38 @@ function buildStatusFilterOptions() {
   container.appendChild(group);
   syncStatusCheckboxStates();
   updateStatusSpecialCheckboxes();
+
+  const options = Array.from(container.querySelectorAll('.filter-option'));
+  const firstIdx = options.findIndex(option => {
+    const status = option.querySelector('input[data-status]');
+    return status && normalizeStatusName(status.dataset.status) === 'TO DO';
+  });
+  const lastIdx = options.findIndex(option => {
+    const status = option.querySelector('input[data-status]');
+    return status && normalizeStatusName(status.dataset.status) === 'CANCELLED';
+  });
+
+  const overlay = document.getElementById('statusCursorOverlay');
+  const line = document.getElementById('statusCursorLine');
+  const handle = document.getElementById('statusCursorHandle');
+
+  if (overlay && !overlay.dataset.initialized) {
+    overlay.dataset.initialized = '1';
+  }
+
+  if (!statusCursorController) {
+    statusCursorController = new StatusCursor({
+      list: container,
+      line,
+      handle
+    });
+    statusCursorController.mount();
+  } else {
+    statusCursorController.refresh();
+  }
+
+  const initialIndex = firstIdx !== -1 ? firstIdx : 0;
+  statusCursorController.setPositionFromIndex(initialIndex);
 }
 
 function normalizeEpicKey(k) {
