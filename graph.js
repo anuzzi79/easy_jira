@@ -62,8 +62,6 @@ const STATUS_SPECIAL_OPTIONS = [
   { key: '__NONE__', label: 'None' }
 ];
 let activeStatusFilters = new Set(STATUS_SEQUENCE);
-let statusCursorStart = null;
-let statusCursorEnd = null;
 const currentGraphState = {
   nodeSelection: null,
   labelSelection: null,
@@ -84,14 +82,18 @@ function logSpec(phase, msg, ok = true) {
 let width, height, simulation, tooltip;
 
 class StatusCursor {
-  constructor({ list, line, handle }) {
+  constructor({ list, line, handle, onMove }) {
     this.list = list;
     this.line = line;
     this.handle = handle;
+    this.onMove = onMove;
     this.items = [];
     this.metrics = [];
     this.position = null;
     this._mounted = false;
+    this.minLimit = null;
+    this.maxLimit = null;
+    this.limitStrategy = null;
   }
 
   mount() {
@@ -124,6 +126,11 @@ class StatusCursor {
     this._cacheItems();
     this._measure();
     if (!this.metrics.length) return;
+    if (this.limitStrategy) {
+      const limits = this.limitStrategy(this.metrics) || {};
+      this.minLimit = Number.isFinite(limits.min) ? limits.min : null;
+      this.maxLimit = Number.isFinite(limits.max) ? limits.max : null;
+    }
     if (this.position == null) {
       this.position = this.metrics[0].center;
     }
@@ -142,6 +149,32 @@ class StatusCursor {
     if (!this.metrics.length) return;
     this.position = this._clampPosition(y);
     this._apply();
+    return this.position;
+  }
+
+  setLimits(min, max) {
+    this.minLimit = Number.isFinite(min) ? min : null;
+    this.maxLimit = Number.isFinite(max) ? max : null;
+    if (this.position != null) {
+      this.position = this._clampPosition(this.position);
+      this._apply();
+    }
+  }
+
+  setLimitStrategy(strategy) {
+    this.limitStrategy = typeof strategy === 'function' ? strategy : null;
+    if (this._mounted) {
+      this.refresh();
+    }
+  }
+
+  getPosition() {
+    return this.position;
+  }
+
+  getMetric(index) {
+    if (index < 0 || index >= this.metrics.length) return null;
+    return this.metrics[index];
   }
 
   _bindHandlers() {
@@ -169,14 +202,17 @@ class StatusCursor {
     if (this.position == null) return;
     if (this.line) this.line.style.top = `${this.position}px`;
     if (this.handle) this.handle.style.top = `${this.position}px`;
+    if (typeof this.onMove === 'function') {
+      this.onMove(this.position, this);
+    }
   }
 
   _clampPosition(y) {
     if (!this.metrics.length) return 0;
     const first = this.metrics[0];
     const last = this.metrics[this.metrics.length - 1];
-    const min = first.top;
-    const max = last.top + last.height;
+    const min = this.minLimit != null ? this.minLimit : first.top;
+    const max = this.maxLimit != null ? this.maxLimit : last.top + last.height;
     return Math.max(min, Math.min(max, y));
   }
 
@@ -222,6 +258,27 @@ class StatusCursor {
     const next = (this.position == null ? 0 : this.position) + delta;
     this.setPosition(next);
   }
+}
+
+let statusCursorStart = null;
+let statusCursorEnd = null;
+let cursorAdjusting = false;
+
+function ensureCursorOrder(sourceCursor) {
+  if (cursorAdjusting) return;
+  if (!statusCursorStart || !statusCursorEnd) return;
+  const startPos = statusCursorStart.getPosition();
+  const endPos = statusCursorEnd.getPosition();
+  if (startPos == null || endPos == null) return;
+  if (startPos <= endPos) return;
+
+  cursorAdjusting = true;
+  if (sourceCursor === statusCursorStart) {
+    statusCursorStart.setPosition(endPos);
+  } else if (sourceCursor === statusCursorEnd) {
+    statusCursorEnd.setPosition(startPos);
+  }
+  cursorAdjusting = false;
 }
 
 // Cache SPECs per epico (vive solo finché la pagina è aperta)
@@ -500,6 +557,10 @@ function buildStatusFilterOptions() {
     const status = option.querySelector('input[data-status]');
     return status && normalizeStatusName(status.dataset.status) === 'CANCELLED';
   });
+  const noneIdx = options.findIndex(option => {
+    const special = option.querySelector('input[data-special="none"]');
+    return Boolean(special);
+  });
 
   const overlay = document.getElementById('statusCursorOverlay');
   const lineStart = document.getElementById('statusCursorLineStart');
@@ -515,7 +576,8 @@ function buildStatusFilterOptions() {
     statusCursorStart = new StatusCursor({
       list: container,
       line: lineStart,
-      handle: handleStart
+      handle: handleStart,
+      onMove: (_, cursor) => ensureCursorOrder(cursor)
     });
     statusCursorStart.mount();
   } else {
@@ -526,12 +588,28 @@ function buildStatusFilterOptions() {
     statusCursorEnd = new StatusCursor({
       list: container,
       line: lineEnd,
-      handle: handleEnd
+      handle: handleEnd,
+      onMove: (_, cursor) => ensureCursorOrder(cursor)
     });
     statusCursorEnd.mount();
   } else {
     statusCursorEnd.refresh();
   }
+
+  const limitStrategy = metrics => {
+    const metricNone = noneIdx !== -1 ? metrics[noneIdx] : null;
+    const metricStart = firstIdx !== -1 ? metrics[firstIdx] : metrics[0];
+    const metricBottom = metrics[metrics.length - 1];
+    if (!metricStart || !metricBottom) return {};
+    const groundTop = metricNone && metricStart
+      ? (metricNone.center + metricStart.center) / 2
+      : metricStart.top;
+    const bottom = metricBottom.top + metricBottom.height;
+    return { min: groundTop, max: bottom };
+  };
+
+  statusCursorStart?.setLimitStrategy(limitStrategy);
+  statusCursorEnd?.setLimitStrategy(limitStrategy);
 
   const initialStartIndex = firstIdx !== -1 ? firstIdx : 0;
   const initialEndIndex = lastIdx !== -1 ? lastIdx : options.length - 1;
