@@ -38,7 +38,7 @@ const STATUS_SEQUENCE = [
   'SKIP UAT',
   'RELEASE CANDIDATE',
   'RELEASE',
-  'CANCELLED'
+  'CANCELED'
 ];
 
 const STATUS_LABEL_MAP = {
@@ -55,7 +55,7 @@ const STATUS_LABEL_MAP = {
   'SKIP UAT': 'Skip UAT',
   'RELEASE CANDIDATE': 'Release Candidate',
   'RELEASE': 'Release',
-  'CANCELLED': 'Cancelled'
+  'CANCELED': 'Canceled'
 };
 const STATUS_SPECIAL_OPTIONS = [
   { key: '__ALL__', label: 'All' },
@@ -333,8 +333,8 @@ function recomputeCurtainStatuses() {
     const listRect = container.getBoundingClientRect();
     const top = rect.top - listRect.top + container.scrollTop;
     const bottom = top + rect.height;
-    const overlapsTopCurtain = top < minPos;
-    const overlapsBottomCurtain = bottom > maxPos;
+    const overlapsTopCurtain = top <= minPos;
+    const overlapsBottomCurtain = (bottom + 0.5) >= maxPos;
     if (overlapsTopCurtain || overlapsBottomCurtain) {
       curtainStatusSet.add(normalizeStatusName(input.dataset.status));
     }
@@ -642,7 +642,7 @@ function buildStatusFilterOptions() {
   });
   const lastIdx = options.findIndex(option => {
     const status = option.querySelector('input[data-status]');
-    return status && normalizeStatusName(status.dataset.status) === 'CANCELLED';
+    return status && normalizeStatusName(status.dataset.status) === 'CANCELED';
   });
   const noneIdx = options.findIndex(option => {
     const special = option.querySelector('input[data-special="none"]');
@@ -697,7 +697,7 @@ function buildStatusFilterOptions() {
     const groundTop = metricNone && metricStart
       ? (metricNone.center + metricStart.center) / 2
       : metricStart.top;
-    const bottom = metricBottom.top + metricBottom.height;
+    const bottom = metricBottom.top + metricBottom.height + 10;
     return { min: groundTop, max: bottom };
   };
 
