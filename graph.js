@@ -66,6 +66,8 @@ let statusCursorStart = null;
 let statusCursorEnd = null;
 let cursorAdjusting = false;
 let curtainStatusSet = new Set();
+const ASSIGNEE_UNASSIGNED = '__UNASSIGNED__';
+let activeAssigneeFilters = null;
 let windowHandleEl = null;
 let windowDragState = null;
 const currentGraphState = {
@@ -75,7 +77,8 @@ const currentGraphState = {
   nodesByKey: new Map(),
   aiLayer: null,
   nodes: [],
-  links: []
+  links: [],
+  assignees: []
 };
 
 // Helper: accoda e mostra stato
@@ -474,18 +477,21 @@ function applyStatusCurtainOpacity() {
   const linkSel = currentGraphState.linkSelection;
   if (!nodeSel || !labelSel || !linkSel) return;
   nodeSel.style('opacity', d => {
-    if (!statusIsAllowed(d.status)) return 0;
+    if (!statusIsAllowed(d.status) || !assigneeIsAllowed(d.assigneeId || d.assignee)) return 0;
     return curtainStatusSet.has(normalizeStatusName(d.status)) ? 0.15 : 1;
   });
   labelSel.style('opacity', d => {
-    if (!statusIsAllowed(d.status)) return 0;
+    if (!statusIsAllowed(d.status) || !assigneeIsAllowed(d.assigneeId || d.assignee)) return 0;
     return curtainStatusSet.has(normalizeStatusName(d.status)) ? 0.15 : 1;
   });
   linkSel.style('opacity', d => {
-    const sourceStatus = getStatusFromEndpoint(d.source);
-    const targetStatus = getStatusFromEndpoint(d.target);
+    const sourceNode = typeof d.source === 'object' ? currentGraphState.nodesByKey.get(d.source.id) : currentGraphState.nodesByKey.get(d.source);
+    const targetNode = typeof d.target === 'object' ? currentGraphState.nodesByKey.get(d.target.id) : currentGraphState.nodesByKey.get(d.target);
+    const sourceStatus = sourceNode?.status;
+    const targetStatus = targetNode?.status;
     if (!sourceStatus || !targetStatus) return 1;
     if (!statusIsAllowed(sourceStatus) || !statusIsAllowed(targetStatus)) return 0;
+    if (!assigneeIsAllowed(sourceNode?.assigneeId || sourceNode?.assignee) || !assigneeIsAllowed(targetNode?.assigneeId || targetNode?.assignee)) return 0;
     const inCurtain = curtainStatusSet.has(normalizeStatusName(sourceStatus)) &&
       curtainStatusSet.has(normalizeStatusName(targetStatus));
     return inCurtain ? 0.15 : 1;
@@ -618,6 +624,19 @@ function statusIsAllowed(statusName) {
   return activeStatusFilters.has(normalized);
 }
 
+function getAssigneeKey(node) {
+  if (!node) return ASSIGNEE_UNASSIGNED;
+  const id = typeof node === 'string' ? node : (node.assigneeId || node.assignee || '');
+  const trimmed = String(id || '').trim();
+  return trimmed ? trimmed : ASSIGNEE_UNASSIGNED;
+}
+
+function assigneeIsAllowed(assigneeId) {
+  if (activeAssigneeFilters === null) return true;
+  if (!activeAssigneeFilters.size) return false;
+  return activeAssigneeFilters.has(getAssigneeKey(assigneeId));
+}
+
 function syncStatusCheckboxStates() {
   const container = document.getElementById('statusFilterList');
   if (!container) return;
@@ -641,14 +660,14 @@ function isNodeKeyVisible(key) {
   if (!key) return true;
   const node = currentGraphState.nodesByKey.get(key);
   if (!node) return true;
-  return statusIsAllowed(node.status);
+  return statusIsAllowed(node.status) && assigneeIsAllowed(node.assigneeId || node.assignee);
 }
 
 function applyStatusFilters() {
   const summaryEl = document.getElementById('statusFilterSummary');
   const totalNodes = Array.isArray(currentGraphState.nodes) ? currentGraphState.nodes.length : 0;
   const visibleNodes = totalNodes
-    ? currentGraphState.nodes.filter(n => statusIsAllowed(n.status)).length
+    ? currentGraphState.nodes.filter(n => statusIsAllowed(n.status) && assigneeIsAllowed(n.assigneeId || n.assignee)).length
     : 0;
 
   if (summaryEl) {
@@ -675,8 +694,8 @@ function applyStatusFilters() {
     return;
   }
 
-  nodeSel.style('display', d => statusIsAllowed(d.status) ? null : 'none');
-  labelSel.style('display', d => statusIsAllowed(d.status) ? null : 'none');
+  nodeSel.style('display', d => (statusIsAllowed(d.status) && assigneeIsAllowed(d.assigneeId || d.assignee)) ? null : 'none');
+  labelSel.style('display', d => (statusIsAllowed(d.status) && assigneeIsAllowed(d.assigneeId || d.assignee)) ? null : 'none');
 
   linkSel.style('display', d => {
     const sid = typeof d.source === 'object' ? d.source.id : d.source;
@@ -1520,7 +1539,9 @@ async function loadGraph(epicKeyRaw) {
           issuetype: issuetypeName,
           category,
           status: normalizeStatusName(issue.fields.status?.name),
-          assignee: (issue.fields.assignee?.displayName || issue.fields.assignee?.name || '').trim()
+          assignee: (issue.fields.assignee?.displayName || issue.fields.assignee?.name || '').trim(),
+          assigneeId: issue.fields.assignee?.accountId || issue.fields.assignee?.name || '',
+          assigneeAvatar: issue.fields.assignee?.avatarUrls?.['24x24'] || issue.fields.assignee?.avatarUrls?.['32x32'] || ''
         });
       } else {
         const n = nodeByKey.get(key);
@@ -1626,6 +1647,29 @@ async function loadGraph(epicKeyRaw) {
     });
 
     const nodes = Array.from(nodeByKey.values());
+    const assigneeMap = new Map();
+    nodes.forEach(node => {
+      const id = getAssigneeKey(node);
+      const label = (node.assignee || '').trim() || 'Unassigned';
+      const avatar = node.assigneeAvatar || '';
+      if (!assigneeMap.has(id)) {
+        assigneeMap.set(id, { id, label, avatar, count: 0 });
+      }
+      assigneeMap.get(id).count += 1;
+    });
+    const assignees = Array.from(assigneeMap.values()).sort((a, b) => a.label.localeCompare(b.label));
+    currentGraphState.assignees = assignees;
+    const assigneeIds = assignees.map(a => a.id);
+    if (activeAssigneeFilters === null) {
+      activeAssigneeFilters = new Set(assigneeIds);
+    } else {
+      activeAssigneeFilters = new Set([...activeAssigneeFilters].filter(id => assigneeIds.includes(id)));
+      if (!activeAssigneeFilters.size && assigneeIds.length) {
+        activeAssigneeFilters = new Set(assigneeIds);
+      }
+    }
+    buildAssigneeFilters();
+
     const allLinks = [...hierLinks, ...relLinks, ...execLinks];
 
     const catById = new Map(nodes.map(n => [n.id, n.category]));
@@ -3415,4 +3459,87 @@ async function fetchSingleDescription(token, key) {
       setStatus(e.message || String(e), false);
     }
   });
+
+  function getInitials(name) {
+    const trimmed = String(name || '').trim();
+    if (!trimmed) return '?';
+    const parts = trimmed.split(/\s+/);
+    if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+    return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+  }
+
+  function buildAssigneeFilters() {
+    const panel = document.getElementById('assigneePanel');
+    const list = document.getElementById('assigneeFilterList');
+    const allBtn = document.getElementById('assigneeSelectAll');
+    const noneBtn = document.getElementById('assigneeSelectNone');
+    if (!panel || !list) return;
+    const assignees = currentGraphState.assignees || [];
+
+    if (!panel.dataset.eventsBound) {
+      panel.dataset.eventsBound = '1';
+      allBtn?.addEventListener('click', () => {
+        const list = currentGraphState.assignees || [];
+        activeAssigneeFilters = new Set(list.map(a => a.id));
+        buildAssigneeFilters();
+        applyStatusFilters();
+      });
+      noneBtn?.addEventListener('click', () => {
+        activeAssigneeFilters = new Set();
+        buildAssigneeFilters();
+        applyStatusFilters();
+      });
+    }
+
+    list.innerHTML = '';
+    if (!assignees.length) {
+      const empty = document.createElement('p');
+      empty.className = 'assignee-empty';
+      empty.textContent = 'Nessun assignee disponibile.';
+      list.appendChild(empty);
+      return;
+    }
+
+    if (activeAssigneeFilters === null) {
+      activeAssigneeFilters = new Set(assignees.map(a => a.id));
+    }
+
+    assignees.forEach(item => {
+      const option = document.createElement('label');
+      option.className = 'assignee-option';
+
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.dataset.assigneeId = item.id;
+      checkbox.checked = activeAssigneeFilters.has(item.id);
+      checkbox.addEventListener('change', () => {
+        if (checkbox.checked) {
+          activeAssigneeFilters.add(item.id);
+        } else {
+          activeAssigneeFilters.delete(item.id);
+        }
+        applyStatusFilters();
+      });
+
+      const avatar = document.createElement('div');
+      avatar.className = 'assignee-avatar';
+      if (item.avatar) {
+        const img = document.createElement('img');
+        img.src = item.avatar;
+        img.alt = item.label;
+        avatar.appendChild(img);
+      } else {
+        avatar.textContent = getInitials(item.label);
+      }
+
+      const label = document.createElement('span');
+      label.textContent = item.count ? `${item.label} (${item.count})` : item.label;
+
+      option.append(checkbox, avatar, label);
+      list.appendChild(option);
+    });
+  }
+
+  window.getInitials = getInitials;
+  window.buildAssigneeFilters = buildAssigneeFilters;
 })();
