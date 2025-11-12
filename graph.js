@@ -74,6 +74,7 @@ let windowHandleEl = null;
 let windowDragState = null;
 let hoveredStatusKey = null;
 let hoveredAssigneeKey = null;
+let hoveredTypeKey = null;
 const currentGraphState = {
   nodeSelection: null,
   labelSelection: null,
@@ -514,12 +515,14 @@ function updateHoverHighlights() {
     const ringSel = g.selectAll('circle.status-hover-ring');
     const normalizedStatus = normalizeStatusName(d.status);
     const assigneeKey = getAssigneeKey(d);
+    const typeKey = String(d.issuetype || '').trim() || 'Unknown';
     const matchesHover = Boolean(
       statusIsAllowed(d.status) &&
       assigneeIsAllowed(d.assigneeId || d.assignee) &&
       typeIsAllowed(d.issuetype) &&
       ((hoveredStatusKey && normalizedStatus === hoveredStatusKey) ||
-       (hoveredAssigneeKey && assigneeKey === hoveredAssigneeKey))
+       (hoveredAssigneeKey && assigneeKey === hoveredAssigneeKey) ||
+       (hoveredTypeKey && typeKey === hoveredTypeKey))
     );
 
     if (!matchesHover) {
@@ -561,6 +564,17 @@ function setHoveredAssignee(assignee) {
 function clearHoveredAssignee() {
   if (!hoveredAssigneeKey) return;
   hoveredAssigneeKey = null;
+  updateHoverHighlights();
+}
+
+function setHoveredType(typeId) {
+  hoveredTypeKey = typeId ? String(typeId).trim() || 'Unknown' : null;
+  updateHoverHighlights();
+}
+
+function clearHoveredType() {
+  if (!hoveredTypeKey) return;
+  hoveredTypeKey = null;
   updateHoverHighlights();
 }
 
@@ -684,8 +698,11 @@ function initFilterTabs() {
       } else {
         clearHoveredStatus();
       }
-      if (target === 'type') {
+      if (target !== 'users') {
         clearHoveredAssignee();
+      }
+      if (target !== 'type') {
+        clearHoveredType();
       }
     });
   });
@@ -1541,6 +1558,7 @@ async function loadGraph(epicKeyRaw) {
     updateStatusSpecialCheckboxes();
     clearHoveredStatus();
     clearHoveredAssignee();
+    clearHoveredType();
     setStatus(`Recupero dati per ${epicKey}…`);
 
     // 1) Epico (chiediamo anche 'description' per estrarre i link delle SPECs)
@@ -3667,11 +3685,13 @@ async function fetchSingleDescription(token, key) {
         const list = currentGraphState.types || [];
         activeTypeFilters = new Set(list.map(t => t.id));
         buildTypeFilters();
+        clearHoveredType();
         applyStatusFilters();
       });
       noneBtn?.addEventListener('click', () => {
         activeTypeFilters = new Set();
         buildTypeFilters();
+        clearHoveredType();
         applyStatusFilters();
       });
     }
@@ -3682,6 +3702,7 @@ async function fetchSingleDescription(token, key) {
       empty.className = 'assignee-empty';
       empty.textContent = 'Nessun tipo disponibile.';
       container.appendChild(empty);
+      clearHoveredType();
       return;
     }
 
@@ -3720,8 +3741,15 @@ async function fetchSingleDescription(token, key) {
       }
 
       option.append(checkbox, text);
+      if (!option.dataset.hoverBound) {
+        option.dataset.hoverBound = '1';
+        option.addEventListener('mouseenter', () => setHoveredType(item.id));
+        option.addEventListener('mouseleave', clearHoveredType);
+      }
       container.appendChild(option);
     });
+
+    updateHoverHighlights();
   }
 
   window.getInitials = getInitials;
