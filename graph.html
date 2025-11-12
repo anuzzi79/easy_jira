@@ -286,6 +286,15 @@
     #statusFilterList .status-cursor-overlay {
       pointer-events: none;
     }
+    @keyframes statusHoverPulse {
+      0% { fill: rgba(37, 99, 235, 0.45); }
+      50% { fill: rgba(125, 211, 252, 0.5); }
+      100% { fill: rgba(37, 99, 235, 0.45); }
+    }
+    .status-hover-ring {
+      pointer-events: none;
+      animation: statusHoverPulse 500ms ease-in-out infinite;
+    }
   </style>
 </head>
 <body>

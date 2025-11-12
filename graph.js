@@ -72,6 +72,7 @@ const ISSUE_TYPE_ALL = '__ALL_TYPES__';
 let activeTypeFilters = null;
 let windowHandleEl = null;
 let windowDragState = null;
+let hoveredStatusKey = null;
 const currentGraphState = {
   nodeSelection: null,
   labelSelection: null,
@@ -500,6 +501,53 @@ function applyStatusCurtainOpacity() {
       curtainStatusSet.has(normalizeStatusName(targetStatus));
     return inCurtain ? 0.15 : 1;
   });
+  updateStatusHoverVisualization();
+}
+
+function updateStatusHoverVisualization() {
+  const nodeSel = currentGraphState.nodeSelection;
+  if (!nodeSel) return;
+
+  nodeSel.each(function(d) {
+    const g = d3.select(this);
+    const ringSel = g.selectAll('circle.status-hover-ring');
+    const matchesHover = Boolean(
+      hoveredStatusKey &&
+      normalizeStatusName(d.status) === hoveredStatusKey &&
+      statusIsAllowed(d.status) &&
+      assigneeIsAllowed(d.assigneeId || d.assignee) &&
+      typeIsAllowed(d.issuetype)
+    );
+
+    if (!matchesHover) {
+      ringSel.remove();
+      return;
+    }
+
+    const baseRadius = d.id === CURRENT_EPIC_KEY ? 10 : 7;
+    const highlightRadius = baseRadius * 2.5;
+
+    ringSel.data([d])
+      .join(enter => enter.append('circle').attr('class', 'status-hover-ring'))
+      .attr('r', highlightRadius)
+      .attr('fill', 'rgba(37, 99, 235, 0.45)');
+
+    const ring = g.select('circle.status-hover-ring');
+    if (!ring.empty()) {
+      ring.lower();
+    }
+  });
+}
+
+function setHoveredStatus(statusKey) {
+  hoveredStatusKey = statusKey ? normalizeStatusName(statusKey) : null;
+  updateStatusHoverVisualization();
+}
+
+function clearHoveredStatus() {
+  if (!hoveredStatusKey) return;
+  hoveredStatusKey = null;
+  updateStatusHoverVisualization();
 }
 
 // Cache SPECs per epico (vive solo finché la pagina è aperta)
@@ -617,6 +665,11 @@ function initFilterTabs() {
       panes.forEach(pane => {
         pane.classList.toggle('active', pane.id === `filters-${target}`);
       });
+      if (target === 'status') {
+        updateStatusHoverVisualization();
+      } else {
+        clearHoveredStatus();
+      }
     });
   });
 }
@@ -805,6 +858,14 @@ function buildStatusFilterOptions() {
   const noneIdx = options.findIndex(option => {
     const special = option.querySelector('input[data-special="none"]');
     return Boolean(special);
+  });
+
+  options.forEach(option => {
+    const statusInput = option.querySelector('input[data-status]');
+    if (!statusInput || option.dataset.hoverBound) return;
+    option.dataset.hoverBound = '1';
+    option.addEventListener('mouseenter', () => setHoveredStatus(statusInput.dataset.status));
+    option.addEventListener('mouseleave', clearHoveredStatus);
   });
 
   const overlay = document.getElementById('statusCursorOverlay');
@@ -1458,6 +1519,10 @@ async function loadGraph(epicKeyRaw) {
     const epicKey = normalizeEpicKey(epicKeyRaw);
     if (!epicKey) throw new Error('Chiave epico non valida.');
     CURRENT_EPIC_KEY = epicKey;
+    activeStatusFilters = new Set(STATUS_SEQUENCE);
+    syncStatusCheckboxStates();
+    updateStatusSpecialCheckboxes();
+    clearHoveredStatus();
     setStatus(`Recupero dati per ${epicKey}…`);
 
     // 1) Epico (chiediamo anche 'description' per estrarre i link delle SPECs)
@@ -1684,23 +1749,9 @@ async function loadGraph(epicKeyRaw) {
     const types = Array.from(typeMap.values()).sort((a, b) => a.label.localeCompare(b.label));
     currentGraphState.types = types;
     const assigneeIds = assignees.map(a => a.id);
-    if (activeAssigneeFilters === null) {
-      activeAssigneeFilters = new Set(assigneeIds);
-    } else {
-      activeAssigneeFilters = new Set([...activeAssigneeFilters].filter(id => assigneeIds.includes(id)));
-      if (!activeAssigneeFilters.size && assigneeIds.length) {
-        activeAssigneeFilters = new Set(assigneeIds);
-      }
-    }
+    activeAssigneeFilters = new Set(assigneeIds);
     const typeIds = types.map(t => t.id);
-    if (activeTypeFilters === null) {
-      activeTypeFilters = new Set(typeIds);
-    } else {
-      activeTypeFilters = new Set([...activeTypeFilters].filter(id => typeIds.includes(id)));
-      if (!activeTypeFilters.size && typeIds.length) {
-        activeTypeFilters = new Set(typeIds);
-      }
-    }
+    activeTypeFilters = new Set(typeIds);
     buildAssigneeFilters();
     buildTypeFilters();
 
@@ -1716,6 +1767,7 @@ async function loadGraph(epicKeyRaw) {
     });
 
     renderForceGraph(nodes, visibleLinks, epicKey, { hierLinks, relLinks });
+    applyStatusFilters();
     setStatus(`Caricato: ${nodes.length} nodi, ${visibleLinks.length} collegamenti.`);
   } catch (err) {
     console.error('Errore nel caricamento del grafico:', err);
