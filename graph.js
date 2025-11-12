@@ -37,7 +37,7 @@ const STATUS_SEQUENCE = [
   'UAT',
   'SKIP UAT',
   'RELEASE CANDIDATE',
-  'RELEASE',
+  'RELEASED',
   'CANCELED'
 ];
 
@@ -54,7 +54,7 @@ const STATUS_LABEL_MAP = {
   'UAT': 'UAT',
   'SKIP UAT': 'Skip UAT',
   'RELEASE CANDIDATE': 'Release Candidate',
-  'RELEASE': 'Release',
+  'RELEASED': 'Released',
   'CANCELED': 'Canceled'
 };
 const STATUS_SPECIAL_OPTIONS = [
@@ -62,6 +62,12 @@ const STATUS_SPECIAL_OPTIONS = [
   { key: '__NONE__', label: 'None' }
 ];
 let activeStatusFilters = new Set(STATUS_SEQUENCE);
+let statusCursorStart = null;
+let statusCursorEnd = null;
+let cursorAdjusting = false;
+let curtainStatusSet = new Set();
+let windowHandleEl = null;
+let windowDragState = null;
 const currentGraphState = {
   nodeSelection: null,
   labelSelection: null,
@@ -284,11 +290,6 @@ class StatusCursor {
   }
 }
 
-let statusCursorStart = null;
-let statusCursorEnd = null;
-let cursorAdjusting = false;
-let curtainStatusSet = new Set();
-
 function getStatusFromEndpoint(endpoint) {
   if (!endpoint) return null;
   const node = typeof endpoint === 'object'
@@ -313,6 +314,130 @@ function ensureCursorOrder(sourceCursor) {
     statusCursorEnd.setPosition(startPos);
   }
   cursorAdjusting = false;
+}
+
+function updateObservationHandle() {
+  if (!windowHandleEl || !statusCursorStart || !statusCursorEnd) return;
+  const startPos = statusCursorStart.getPosition();
+  const endPos = statusCursorEnd.getPosition();
+  if (startPos == null || endPos == null) return;
+  const top = Math.min(startPos, endPos);
+  const bottom = Math.max(startPos, endPos);
+  const height = Math.max(32, bottom - top);
+  windowHandleEl.style.top = `${top}px`;
+  windowHandleEl.style.height = `${height}px`;
+}
+
+function shiftObservationWindow(delta) {
+  if (!statusCursorStart || !statusCursorEnd) return;
+  const startPos = statusCursorStart.getPosition();
+  const endPos = statusCursorEnd.getPosition();
+  if (startPos == null || endPos == null) return;
+  const ascending = startPos <= endPos;
+  const lower = ascending ? startPos : endPos;
+  const upper = ascending ? endPos : startPos;
+  const windowSize = upper - lower;
+  const minLimit = Math.min(
+    statusCursorStart?.minLimit ?? lower,
+    statusCursorEnd?.minLimit ?? lower
+  );
+  const maxLimit = Math.max(
+    statusCursorStart?.maxLimit ?? upper,
+    statusCursorEnd?.maxLimit ?? upper
+  );
+  const minLower = minLimit;
+  const maxLower = Math.max(minLower, maxLimit - windowSize);
+  let newLower = lower + delta;
+  newLower = Math.max(minLower, Math.min(maxLower, newLower));
+  const newUpper = newLower + windowSize;
+  cursorAdjusting = true;
+  if (ascending) {
+    statusCursorStart.setPosition(newLower);
+    statusCursorEnd.setPosition(newUpper);
+  } else {
+    statusCursorStart.setPosition(newUpper);
+    statusCursorEnd.setPosition(newLower);
+  }
+  cursorAdjusting = false;
+  ensureCursorOrder();
+  recomputeCurtainStatuses();
+  updateObservationHandle();
+}
+
+function initObservationHandle() {
+  windowHandleEl = document.getElementById('statusWindowHandle');
+  if (!windowHandleEl || windowHandleEl.dataset.bound) return;
+  windowHandleEl.dataset.bound = '1';
+  windowHandleEl.addEventListener('pointerdown', onObservationHandlePointerDown);
+  windowHandleEl.addEventListener('keydown', onObservationHandleKeyDown);
+}
+
+function onObservationHandlePointerDown(event) {
+  if (!statusCursorStart || !statusCursorEnd) return;
+  event.preventDefault();
+  const pointerId = event.pointerId;
+  windowHandleEl.setPointerCapture(pointerId);
+  const startPos = statusCursorStart.getPosition() ?? 0;
+  const endPos = statusCursorEnd.getPosition() ?? startPos;
+  const ascending = startPos <= endPos;
+  const lower = ascending ? startPos : endPos;
+  const upper = ascending ? endPos : startPos;
+  const minLimit = Math.min(
+    statusCursorStart?.minLimit ?? lower,
+    statusCursorEnd?.minLimit ?? lower
+  );
+  const maxLimit = Math.max(
+    statusCursorStart?.maxLimit ?? upper,
+    statusCursorEnd?.maxLimit ?? upper
+  );
+  windowDragState = {
+    pointerId,
+    startY: event.clientY,
+    lower,
+    upper,
+    minLimit,
+    maxLimit,
+    ascending
+  };
+  const onMove = ev => {
+    if (!windowDragState) return;
+    const delta = ev.clientY - windowDragState.startY;
+    const windowSize = windowDragState.upper - windowDragState.lower;
+    const minLower = windowDragState.minLimit;
+    const maxLower = Math.max(minLower, windowDragState.maxLimit - windowSize);
+    let newLower = windowDragState.lower + delta;
+    newLower = Math.max(minLower, Math.min(maxLower, newLower));
+    const newUpper = newLower + windowSize;
+    cursorAdjusting = true;
+    if (windowDragState.ascending) {
+      statusCursorStart.setPosition(newLower);
+      statusCursorEnd.setPosition(newUpper);
+    } else {
+      statusCursorStart.setPosition(newUpper);
+      statusCursorEnd.setPosition(newLower);
+    }
+    cursorAdjusting = false;
+    ensureCursorOrder();
+    recomputeCurtainStatuses();
+    updateObservationHandle();
+  };
+  const onUp = () => {
+    windowHandleEl.releasePointerCapture(pointerId);
+    windowHandleEl.removeEventListener('pointermove', onMove);
+    windowHandleEl.removeEventListener('pointerup', onUp);
+    windowHandleEl.removeEventListener('pointercancel', onUp);
+    windowDragState = null;
+  };
+  windowHandleEl.addEventListener('pointermove', onMove);
+  windowHandleEl.addEventListener('pointerup', onUp);
+  windowHandleEl.addEventListener('pointercancel', onUp);
+}
+
+function onObservationHandleKeyDown(event) {
+  if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+  event.preventDefault();
+  const delta = event.key === 'ArrowUp' ? -12 : 12;
+  shiftObservationWindow(delta);
 }
 
 function recomputeCurtainStatuses() {
@@ -340,6 +465,7 @@ function recomputeCurtainStatuses() {
     }
   });
   applyStatusCurtainOpacity();
+  updateObservationHandle();
 }
 
 function applyStatusCurtainOpacity() {
@@ -668,7 +794,7 @@ function buildStatusFilterOptions() {
       handle: handleStart,
       curtain: curtainStart,
       mode: 'from',
-      onMove: (_, cursor) => { ensureCursorOrder(cursor); recomputeCurtainStatuses(); }
+      onMove: (_, cursor) => { ensureCursorOrder(cursor); recomputeCurtainStatuses(); updateObservationHandle(); }
     });
     statusCursorStart.mount();
   } else {
@@ -682,7 +808,7 @@ function buildStatusFilterOptions() {
       handle: handleEnd,
       curtain: curtainEnd,
       mode: 'to',
-      onMove: (_, cursor) => { ensureCursorOrder(cursor); recomputeCurtainStatuses(); }
+      onMove: (_, cursor) => { ensureCursorOrder(cursor); recomputeCurtainStatuses(); updateObservationHandle(); }
     });
     statusCursorEnd.mount();
   } else {
@@ -708,7 +834,9 @@ function buildStatusFilterOptions() {
   const initialEndIndex = lastIdx !== -1 ? lastIdx : options.length - 1;
   statusCursorStart?.setPositionFromIndex(initialStartIndex);
   statusCursorEnd?.setPositionFromIndex(initialEndIndex);
+  initObservationHandle();
   recomputeCurtainStatuses();
+  updateObservationHandle();
 }
 
 function normalizeEpicKey(k) {
