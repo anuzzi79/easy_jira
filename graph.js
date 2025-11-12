@@ -73,6 +73,7 @@ let activeTypeFilters = null;
 let windowHandleEl = null;
 let windowDragState = null;
 let hoveredStatusKey = null;
+let hoveredAssigneeKey = null;
 const currentGraphState = {
   nodeSelection: null,
   labelSelection: null,
@@ -501,22 +502,24 @@ function applyStatusCurtainOpacity() {
       curtainStatusSet.has(normalizeStatusName(targetStatus));
     return inCurtain ? 0.15 : 1;
   });
-  updateStatusHoverVisualization();
+  updateHoverHighlights();
 }
 
-function updateStatusHoverVisualization() {
+function updateHoverHighlights() {
   const nodeSel = currentGraphState.nodeSelection;
   if (!nodeSel) return;
 
   nodeSel.each(function(d) {
     const g = d3.select(this);
     const ringSel = g.selectAll('circle.status-hover-ring');
+    const normalizedStatus = normalizeStatusName(d.status);
+    const assigneeKey = getAssigneeKey(d);
     const matchesHover = Boolean(
-      hoveredStatusKey &&
-      normalizeStatusName(d.status) === hoveredStatusKey &&
       statusIsAllowed(d.status) &&
       assigneeIsAllowed(d.assigneeId || d.assignee) &&
-      typeIsAllowed(d.issuetype)
+      typeIsAllowed(d.issuetype) &&
+      ((hoveredStatusKey && normalizedStatus === hoveredStatusKey) ||
+       (hoveredAssigneeKey && assigneeKey === hoveredAssigneeKey))
     );
 
     if (!matchesHover) {
@@ -541,13 +544,24 @@ function updateStatusHoverVisualization() {
 
 function setHoveredStatus(statusKey) {
   hoveredStatusKey = statusKey ? normalizeStatusName(statusKey) : null;
-  updateStatusHoverVisualization();
+  updateHoverHighlights();
 }
 
 function clearHoveredStatus() {
   if (!hoveredStatusKey) return;
   hoveredStatusKey = null;
-  updateStatusHoverVisualization();
+  updateHoverHighlights();
+}
+
+function setHoveredAssignee(assignee) {
+  hoveredAssigneeKey = assignee ? getAssigneeKey(assignee) : null;
+  updateHoverHighlights();
+}
+
+function clearHoveredAssignee() {
+  if (!hoveredAssigneeKey) return;
+  hoveredAssigneeKey = null;
+  updateHoverHighlights();
 }
 
 // Cache SPECs per epico (vive solo finché la pagina è aperta)
@@ -669,6 +683,9 @@ function initFilterTabs() {
         updateStatusHoverVisualization();
       } else {
         clearHoveredStatus();
+      }
+      if (target === 'type') {
+        clearHoveredAssignee();
       }
     });
   });
@@ -1523,6 +1540,7 @@ async function loadGraph(epicKeyRaw) {
     syncStatusCheckboxStates();
     updateStatusSpecialCheckboxes();
     clearHoveredStatus();
+    clearHoveredAssignee();
     setStatus(`Recupero dati per ${epicKey}…`);
 
     // 1) Epico (chiediamo anche 'description' per estrarre i link delle SPECs)
@@ -3568,11 +3586,13 @@ async function fetchSingleDescription(token, key) {
         const list = currentGraphState.assignees || [];
         activeAssigneeFilters = new Set(list.map(a => a.id));
         buildAssigneeFilters();
+        clearHoveredAssignee();
         applyStatusFilters();
       });
       noneBtn?.addEventListener('click', () => {
         activeAssigneeFilters = new Set();
         buildAssigneeFilters();
+        clearHoveredAssignee();
         applyStatusFilters();
       });
     }
@@ -3583,6 +3603,7 @@ async function fetchSingleDescription(token, key) {
       empty.className = 'assignee-empty';
       empty.textContent = 'Nessun assignee disponibile.';
       list.appendChild(empty);
+      clearHoveredAssignee();
       return;
     }
 
@@ -3622,8 +3643,15 @@ async function fetchSingleDescription(token, key) {
       label.textContent = item.count ? `${item.label} (${item.count})` : item.label;
 
       option.append(checkbox, avatar, label);
+      if (!option.dataset.hoverBound) {
+        option.dataset.hoverBound = '1';
+        option.addEventListener('mouseenter', () => setHoveredAssignee(item.id));
+        option.addEventListener('mouseleave', clearHoveredAssignee);
+      }
       list.appendChild(option);
     });
+
+    updateHoverHighlights();
   }
 
   function buildTypeFilters() {
