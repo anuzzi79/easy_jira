@@ -316,7 +316,12 @@
         </div>
       </div>
       <div id="filters-type" class="filters-pane">
-        <p style="color:#94a3b8;font-size:13px;">(Nessun filtro disponibile)</p>
+        <div class="filters-summary" id="typeFilterSummary">Filtra per tipo di issue.</div>
+        <div class="filters-actions" style="display:flex;gap:6px;margin-bottom:12px;">
+          <button id="typeSelectAll" type="button">All</button>
+          <button id="typeSelectNone" type="button">None</button>
+        </div>
+        <div class="filters-group" id="typeFilterList"></div>
       </div>
     </div>
   </aside>

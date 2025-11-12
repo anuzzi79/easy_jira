@@ -68,6 +68,8 @@ let cursorAdjusting = false;
 let curtainStatusSet = new Set();
 const ASSIGNEE_UNASSIGNED = '__UNASSIGNED__';
 let activeAssigneeFilters = null;
+const ISSUE_TYPE_ALL = '__ALL_TYPES__';
+let activeTypeFilters = null;
 let windowHandleEl = null;
 let windowDragState = null;
 const currentGraphState = {
@@ -446,6 +448,7 @@ function onObservationHandleKeyDown(event) {
 function recomputeCurtainStatuses() {
   const container = document.getElementById('statusFilterList');
   if (!container || !statusCursorStart || !statusCursorEnd) return;
+  if (container.offsetParent === null || (container.offsetWidth === 0 && container.offsetHeight === 0)) return;
   const options = Array.from(container.querySelectorAll('.filter-option input[data-status]'));
   if (!options.length) return;
   const startPos = statusCursorStart.getPosition();
@@ -477,11 +480,11 @@ function applyStatusCurtainOpacity() {
   const linkSel = currentGraphState.linkSelection;
   if (!nodeSel || !labelSel || !linkSel) return;
   nodeSel.style('opacity', d => {
-    if (!statusIsAllowed(d.status) || !assigneeIsAllowed(d.assigneeId || d.assignee)) return 0;
+    if (!statusIsAllowed(d.status) || !assigneeIsAllowed(d.assigneeId || d.assignee) || !typeIsAllowed(d.issuetype)) return 0;
     return curtainStatusSet.has(normalizeStatusName(d.status)) ? 0.15 : 1;
   });
   labelSel.style('opacity', d => {
-    if (!statusIsAllowed(d.status) || !assigneeIsAllowed(d.assigneeId || d.assignee)) return 0;
+    if (!statusIsAllowed(d.status) || !assigneeIsAllowed(d.assigneeId || d.assignee) || !typeIsAllowed(d.issuetype)) return 0;
     return curtainStatusSet.has(normalizeStatusName(d.status)) ? 0.15 : 1;
   });
   linkSel.style('opacity', d => {
@@ -492,6 +495,7 @@ function applyStatusCurtainOpacity() {
     if (!sourceStatus || !targetStatus) return 1;
     if (!statusIsAllowed(sourceStatus) || !statusIsAllowed(targetStatus)) return 0;
     if (!assigneeIsAllowed(sourceNode?.assigneeId || sourceNode?.assignee) || !assigneeIsAllowed(targetNode?.assigneeId || targetNode?.assignee)) return 0;
+    if (!typeIsAllowed(sourceNode?.issuetype) || !typeIsAllowed(targetNode?.issuetype)) return 0;
     const inCurtain = curtainStatusSet.has(normalizeStatusName(sourceStatus)) &&
       curtainStatusSet.has(normalizeStatusName(targetStatus));
     return inCurtain ? 0.15 : 1;
@@ -637,6 +641,13 @@ function assigneeIsAllowed(assigneeId) {
   return activeAssigneeFilters.has(getAssigneeKey(assigneeId));
 }
 
+function typeIsAllowed(issueType) {
+  if (activeTypeFilters === null) return true;
+  if (!activeTypeFilters.size) return false;
+  const key = String(issueType || '').trim() || 'Unknown';
+  return activeTypeFilters.has(key);
+}
+
 function syncStatusCheckboxStates() {
   const container = document.getElementById('statusFilterList');
   if (!container) return;
@@ -660,14 +671,16 @@ function isNodeKeyVisible(key) {
   if (!key) return true;
   const node = currentGraphState.nodesByKey.get(key);
   if (!node) return true;
-  return statusIsAllowed(node.status) && assigneeIsAllowed(node.assigneeId || node.assignee);
+  return statusIsAllowed(node.status) &&
+    assigneeIsAllowed(node.assigneeId || node.assignee) &&
+    typeIsAllowed(node.issuetype);
 }
 
 function applyStatusFilters() {
   const summaryEl = document.getElementById('statusFilterSummary');
   const totalNodes = Array.isArray(currentGraphState.nodes) ? currentGraphState.nodes.length : 0;
   const visibleNodes = totalNodes
-    ? currentGraphState.nodes.filter(n => statusIsAllowed(n.status) && assigneeIsAllowed(n.assigneeId || n.assignee)).length
+    ? currentGraphState.nodes.filter(n => statusIsAllowed(n.status) && assigneeIsAllowed(n.assigneeId || n.assignee) && typeIsAllowed(n.issuetype)).length
     : 0;
 
   if (summaryEl) {
@@ -694,8 +707,8 @@ function applyStatusFilters() {
     return;
   }
 
-  nodeSel.style('display', d => (statusIsAllowed(d.status) && assigneeIsAllowed(d.assigneeId || d.assignee)) ? null : 'none');
-  labelSel.style('display', d => (statusIsAllowed(d.status) && assigneeIsAllowed(d.assigneeId || d.assignee)) ? null : 'none');
+  nodeSel.style('display', d => (statusIsAllowed(d.status) && assigneeIsAllowed(d.assigneeId || d.assignee) && typeIsAllowed(d.issuetype)) ? null : 'none');
+  labelSel.style('display', d => (statusIsAllowed(d.status) && assigneeIsAllowed(d.assigneeId || d.assignee) && typeIsAllowed(d.issuetype)) ? null : 'none');
 
   linkSel.style('display', d => {
     const sid = typeof d.source === 'object' ? d.source.id : d.source;
@@ -1537,6 +1550,7 @@ async function loadGraph(epicKeyRaw) {
           summary: issue.fields.summary || '',
           type,
           issuetype: issuetypeName,
+          issuetypeIcon: issue.fields.issuetype?.iconUrl || '',
           category,
           status: normalizeStatusName(issue.fields.status?.name),
           assignee: (issue.fields.assignee?.displayName || issue.fields.assignee?.name || '').trim(),
@@ -1648,6 +1662,7 @@ async function loadGraph(epicKeyRaw) {
 
     const nodes = Array.from(nodeByKey.values());
     const assigneeMap = new Map();
+    const typeMap = new Map();
     nodes.forEach(node => {
       const id = getAssigneeKey(node);
       const label = (node.assignee || '').trim() || 'Unassigned';
@@ -1656,9 +1671,18 @@ async function loadGraph(epicKeyRaw) {
         assigneeMap.set(id, { id, label, avatar, count: 0 });
       }
       assigneeMap.get(id).count += 1;
+
+      const typeKey = (node.issuetype || '').trim() || 'Unknown';
+      const typeIcon = node.issuetypeIcon || '';
+      if (!typeMap.has(typeKey)) {
+        typeMap.set(typeKey, { id: typeKey, label: typeKey, icon: typeIcon, count: 0 });
+      }
+      typeMap.get(typeKey).count += 1;
     });
     const assignees = Array.from(assigneeMap.values()).sort((a, b) => a.label.localeCompare(b.label));
     currentGraphState.assignees = assignees;
+    const types = Array.from(typeMap.values()).sort((a, b) => a.label.localeCompare(b.label));
+    currentGraphState.types = types;
     const assigneeIds = assignees.map(a => a.id);
     if (activeAssigneeFilters === null) {
       activeAssigneeFilters = new Set(assigneeIds);
@@ -1668,7 +1692,17 @@ async function loadGraph(epicKeyRaw) {
         activeAssigneeFilters = new Set(assigneeIds);
       }
     }
+    const typeIds = types.map(t => t.id);
+    if (activeTypeFilters === null) {
+      activeTypeFilters = new Set(typeIds);
+    } else {
+      activeTypeFilters = new Set([...activeTypeFilters].filter(id => typeIds.includes(id)));
+      if (!activeTypeFilters.size && typeIds.length) {
+        activeTypeFilters = new Set(typeIds);
+      }
+    }
     buildAssigneeFilters();
+    buildTypeFilters();
 
     const allLinks = [...hierLinks, ...relLinks, ...execLinks];
 
@@ -3540,6 +3574,77 @@ async function fetchSingleDescription(token, key) {
     });
   }
 
+  function buildTypeFilters() {
+    const container = document.getElementById('typeFilterList');
+    const allBtn = document.getElementById('typeSelectAll');
+    const noneBtn = document.getElementById('typeSelectNone');
+    if (!container) return;
+    const types = currentGraphState.types || [];
+
+    if (!container.dataset.eventsBound) {
+      container.dataset.eventsBound = '1';
+      allBtn?.addEventListener('click', () => {
+        const list = currentGraphState.types || [];
+        activeTypeFilters = new Set(list.map(t => t.id));
+        buildTypeFilters();
+        applyStatusFilters();
+      });
+      noneBtn?.addEventListener('click', () => {
+        activeTypeFilters = new Set();
+        buildTypeFilters();
+        applyStatusFilters();
+      });
+    }
+
+    container.innerHTML = '';
+    if (!types.length) {
+      const empty = document.createElement('p');
+      empty.className = 'assignee-empty';
+      empty.textContent = 'Nessun tipo disponibile.';
+      container.appendChild(empty);
+      return;
+    }
+
+    if (activeTypeFilters === null) {
+      activeTypeFilters = new Set(types.map(t => t.id));
+    }
+
+    types.forEach(item => {
+      const option = document.createElement('label');
+      option.className = 'filter-option';
+
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.dataset.typeId = item.id;
+      checkbox.checked = activeTypeFilters.has(item.id);
+      checkbox.addEventListener('change', () => {
+        if (checkbox.checked) {
+          activeTypeFilters.add(item.id);
+        } else {
+          activeTypeFilters.delete(item.id);
+        }
+        applyStatusFilters();
+      });
+
+      const text = document.createElement('span');
+      text.textContent = item.count ? `${item.label} (${item.count})` : item.label;
+
+      if (item.icon) {
+        const icon = document.createElement('img');
+        icon.src = item.icon;
+        icon.alt = item.label;
+        icon.width = 16;
+        icon.height = 16;
+        icon.style.marginRight = '8px';
+        option.appendChild(icon);
+      }
+
+      option.append(checkbox, text);
+      container.appendChild(option);
+    });
+  }
+
   window.getInitials = getInitials;
   window.buildAssigneeFilters = buildAssigneeFilters;
+  window.buildTypeFilters = buildTypeFilters;
 })();
