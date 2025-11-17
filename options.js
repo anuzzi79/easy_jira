@@ -19,6 +19,7 @@ const testOutput = $('testOutput');
 
 const revealBtn = $('revealKeys');
 const clearOpenAI = $('clearOpenAI');
+const jiraApiKeyInfo = $('jiraApiKeyInfo');
 
 function setChip(kind, text) {
   openAiState.className = 'chip ' + (kind || 'warn');
@@ -36,7 +37,8 @@ async function loadSettings() {
   const cfg = await chrome.storage.sync.get([
     'jiraBaseUrl','jiraEmail','jiraApiKey','openAiApiKey'
   ]);
-  jiraBaseUrl.value = cfg.jiraBaseUrl || '';
+  // Pre-carica Base URL se non salvato
+  jiraBaseUrl.value = cfg.jiraBaseUrl || 'https://facilitygrid.atlassian.net';
   jiraEmail.value = cfg.jiraEmail || '';
   jiraApiKey.value = cfg.jiraApiKey || '';
   openAiApiKey.value = cfg.openAiApiKey || '';
@@ -147,5 +149,15 @@ saveOpenAIBtn.addEventListener('click', saveOpenAI);
 testOpenAIBtn.addEventListener('click', testOpenAI);
 revealBtn.addEventListener('click', toggleReveal);
 clearOpenAI.addEventListener('click', wipeOpenAI);
+
+// Icona info per API Token Jira
+if (jiraApiKeyInfo) {
+  // Imposta il path corretto per l'estensione
+  jiraApiKeyInfo.src = chrome.runtime.getURL('icons/info.png');
+  jiraApiKeyInfo.addEventListener('click', (e) => {
+    e.preventDefault();
+    chrome.tabs.create({ url: 'https://www.youtube.com/watch?v=X1F5LfCuq6I' });
+  });
+}
 
 loadSettings();

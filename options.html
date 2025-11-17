@@ -32,6 +32,8 @@
     .footer{display:flex;justify-content:space-between;align-items:center;margin-top:16px}
     .hint{font-size:12px;color:var(--muted)}
     .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,'Liberation Mono','Courier New',monospace}
+    label img{opacity:0.6;transition:opacity 0.2s}
+    label img:hover{opacity:1}
   </style>
 </head>
 <body>
@@ -46,7 +48,14 @@
         <input id="jiraBaseUrl" type="text" placeholder="https://…">
         <label for="jiraEmail">Email Jira</label>
         <input id="jiraEmail" type="text" placeholder="nome@azienda.com">
-        <label for="jiraApiKey">API Token Jira</label>
+        <label for="jiraApiKey">
+          API Token Jira
+          <img src="icons/info.png" 
+               alt="Info" 
+               style="width:14px;height:14px;margin-left:6px;vertical-align:middle;cursor:pointer;" 
+               id="jiraApiKeyInfo"
+               title="Come ottenere l'API Token">
+        </label>
         <input id="jiraApiKey" type="password" placeholder="••••••••••">
         <div class="footer">
           <button id="saveJira" class="btn primary">Salva credenziali Jira</button>

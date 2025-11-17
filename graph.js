@@ -2,13 +2,26 @@ let JIRA_BASE = 'https://facilitygrid.atlassian.net';
 let CURRENT_AUTH_TOKEN = null; // usato per operazioni interattive (crea issue link)
 let CURRENT_EPIC_KEY = null;  // epico attualmente caricato
 
-const epicSelect = document.getElementById('epicSelect');
+let epicSelect = document.getElementById('epicSelect');
 const runBtn = document.getElementById('run'); // legacy (può essere nullo)
 const headerEl = document.querySelector('.header');
 const statusEl = document.getElementById('status');
 const viewSpecsBtn = document.getElementById('viewSpecs');
 const svg = d3.select('#canvas');
 let lastApiDebug = null;
+
+// Sistema di logging per il bootstrap (traccia ogni passo del primo caricamento)
+window.EJ_BOOT_LOG = [];
+function logBootStep(step, details = {}) {
+  const entry = {
+    timestamp: new Date().toISOString(),
+    step,
+    details,
+    stack: new Error().stack?.split('\n').slice(2, 5).map(s => s.trim()).join(' | ') || 'N/A'
+  };
+  window.EJ_BOOT_LOG.push(entry);
+  console.log(`[BOOT] ${step}`, details);
+}
 
 // Buffer diagnostico SPECs (mostrato nel popup e copiabile)
 let specsDiag = [];
@@ -61,6 +74,9 @@ const STATUS_SPECIAL_OPTIONS = [
   { key: '__ALL__', label: 'All' },
   { key: '__NONE__', label: 'None' }
 ];
+const NO_EPIC_OPTION = '__NO_EPIC__';
+const MINOR_FIXES_OPTION = '__MINOR_FIXES__';
+const SPECIFIC_EPIC_OPTION = '__SPECIFIC_EPIC__';
 let activeStatusFilters = new Set(STATUS_SEQUENCE);
 let statusCursorStart = null;
 let statusCursorEnd = null;
@@ -600,6 +616,178 @@ function setStatus(msg, ok = true) {
   statusEl.style.color = ok ? '#16a34a' : '#dc2626';
 }
 
+/**
+ * Crea e mostra una status bar di progresso per operazioni asincrone
+ * @param {string} initialMessage - Messaggio iniziale
+ * @returns {Object} - { update: function, close: function, log: function }
+ */
+function createProgressStatusBar(initialMessage, options = {}) {
+  const variant = options.variant || 'banner';
+  
+  // Variante minimal: sottile linea blu alla base dell'header
+  if (variant === 'thin') {
+    const host = headerEl || document.querySelector('.header') || document.body;
+    // Contenitore linea (trasparente, serve per posizionamento)
+    const line = document.createElement('div');
+    line.id = 'ej-progress-header-line';
+    line.style.cssText = `
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 3px;
+      background: transparent;
+      overflow: hidden;
+      z-index: 1000;
+    `;
+    // Riempimento progressivo
+    const fill = document.createElement('div');
+    fill.style.cssText = `
+      height: 100%;
+      width: 0%;
+      background: #2563eb;
+      transition: width 0.25s ease;
+    `;
+    line.appendChild(fill);
+    // L'header ha già position: relative in CSS, quindi appendiamo lì
+    (host || document.body).appendChild(line);
+    
+    return {
+      update: (_message, percent = null) => {
+        if (percent !== null) {
+          const p = Math.max(0, Math.min(100, percent));
+          fill.style.width = `${p}%`;
+        }
+      },
+      log: () => {}, // nessun log nella versione sottile
+      close: () => {
+        line.style.transition = 'opacity 0.2s ease';
+        line.style.opacity = '0';
+        setTimeout(() => line.remove(), 200);
+      }
+    };
+  }
+  
+  // Variante precedente (banner in alto) usata per flussi lunghi come Minor Fixes
+  const container = document.createElement('div');
+  container.id = 'ej-progress-status-bar';
+  container.style.cssText = `
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    padding: 12px 20px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    z-index: 10000;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  `;
+  
+  const progressBar = document.createElement('div');
+  progressBar.style.cssText = `
+    height: 3px;
+    background: rgba(255,255,255,0.3);
+    border-radius: 2px;
+    overflow: hidden;
+    position: relative;
+  `;
+  const progressFill = document.createElement('div');
+  progressFill.style.cssText = `
+    height: 100%;
+    width: 0%;
+    background: white;
+    border-radius: 2px;
+    transition: width 0.3s ease;
+    animation: progress-shimmer 1.5s infinite;
+  `;
+  progressBar.appendChild(progressFill);
+  
+  const mainMessage = document.createElement('div');
+  mainMessage.style.cssText = `
+    font-size: 14px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  `;
+  mainMessage.textContent = initialMessage;
+  
+  const logContainer = document.createElement('div');
+  logContainer.id = 'ej-progress-log';
+  logContainer.style.cssText = `
+    font-size: 12px;
+    opacity: 0.9;
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.3s ease;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  `;
+  
+  container.appendChild(progressBar);
+  container.appendChild(mainMessage);
+  container.appendChild(logContainer);
+  document.body.appendChild(container);
+  
+  const logs = [];
+  
+  if (!document.getElementById('ej-progress-shimmer-style')) {
+    const style = document.createElement('style');
+    style.id = 'ej-progress-shimmer-style';
+    style.textContent = `
+      @keyframes progress-shimmer {
+        0% { transform: translateX(-100%); }
+        100% { transform: translateX(300%); }
+      }
+      @keyframes progress-shimmer-fill {
+        0% { background-position: -200% 0; }
+        100% { background-position: 200% 0; }
+      }
+    `;
+    document.head.appendChild(style);
+  }
+  
+  return {
+    update: (message, progressPercent = null) => {
+      if (message) mainMessage.textContent = message;
+      if (progressPercent !== null) {
+        const progress = Math.max(0, Math.min(100, progressPercent));
+        progressFill.style.width = `${progress}%`;
+      }
+    },
+    log: (message, type = 'info') => {
+      const logEntry = document.createElement('div');
+      const timestamp = new Date().toLocaleTimeString('it-IT');
+      const icon = type === 'success' ? '✓' : type === 'error' ? '✗' : type === 'warning' ? '⚠' : '•';
+      logEntry.textContent = `[${timestamp}] ${icon} ${message}`;
+      logEntry.style.cssText = `
+        padding: 2px 0;
+        opacity: 0.85;
+      `;
+      logs.push({ message, type, timestamp });
+      logContainer.appendChild(logEntry);
+      if (logs.length > 0 && logContainer.style.maxHeight === '0px') {
+        logContainer.style.maxHeight = '200px';
+      }
+      logContainer.scrollTop = logContainer.scrollHeight;
+    },
+    close: () => {
+      container.style.transition = 'opacity 0.3s ease, transform 0.3s ease';
+      container.style.opacity = '0';
+      container.style.transform = 'translateY(-100%)';
+      setTimeout(() => {
+        if (container.parentNode) {
+          container.parentNode.removeChild(container);
+        }
+      }, 300);
+    }
+  };
+}
+
 function ensureSimilarityControl() {
   if (similarityControlEl) return;
   const container = headerEl || (runBtn ? runBtn.parentElement : null);
@@ -1091,7 +1279,9 @@ async function fetchActiveSprintEpics(token) {
   for (let i = 0; i < keyList.length; i += 50) chunks.push(keyList.slice(i, i + 50));
   const out = [];
   for (const ch of chunks) {
-    const jql = `key in (${ch.join(',')}) AND issuetype = Epic`;
+    // Escludi Epic con determinati status dalla lista del menu a tendina
+    const excludedJql = "status NOT IN ('Released','Closed','Pending development','Backlog')";
+    const jql = `key in (${ch.join(',')}) AND issuetype = Epic AND ${excludedJql}`;
     const ep = await jiraSearch(token, jql, ['summary','issuetype']).catch(() => []);
     ep.forEach(e => out.push({ key: e.key, summary: e.fields.summary }));
   }
@@ -1540,6 +1730,12 @@ async function _loadEpicSpecs(epicIssue, token){
 window.addEventListener('unload', ()=>{ try{ window.EJ_SPECS_CACHE = {}; }catch{} });
 
 async function loadGraph(epicKeyRaw) {
+  logBootStep('LOAD_GRAPH_ENTRY', { 
+    epicKeyRaw,
+    hasBuildAssigneeFilters: typeof window.buildAssigneeFilters === 'function',
+    hasBuildTypeFilters: typeof window.buildTypeFilters === 'function'
+  });
+  
   try {
     setStatus('Caricamento credenziali…');
     let token;
@@ -1551,8 +1747,14 @@ async function loadGraph(epicKeyRaw) {
     CURRENT_AUTH_TOKEN = token;
 
     const epicKey = normalizeEpicKey(epicKeyRaw);
+    if (epicKeyRaw === NO_EPIC_OPTION) {
+      CURRENT_EPIC_KEY = NO_EPIC_OPTION;
+      await loadNoEpicCards(token);
+      return;
+    }
     if (!epicKey) throw new Error('Chiave epico non valida.');
     CURRENT_EPIC_KEY = epicKey;
+    logBootStep('LOAD_GRAPH_EPIC_KEY_SET', { epicKey });
     activeStatusFilters = new Set(STATUS_SEQUENCE);
     syncStatusCheckboxStates();
     updateStatusSpecialCheckboxes();
@@ -1569,6 +1771,18 @@ async function loadGraph(epicKeyRaw) {
       ['summary','issuetype','description'] // <<<  AGGIUNTO
     );
     if (!epicIssue.length) throw new Error(`Epico ${epicKey} non trovato.`);
+    
+    // Aggiorna l'etichetta nel select con "KEY — Summary" se presente
+    try {
+      const summary = epicIssue[0]?.fields?.summary || '';
+      if (epicSelect) {
+        let opt = Array.from(epicSelect.options).find(o => o.value === epicKey);
+        if (opt) {
+          opt.textContent = `${epicKey}${summary ? ' — ' + summary : ''}`;
+          epicSelect.value = epicKey;
+        }
+      }
+    } catch {}
 
     // Carica SPECs dell'epico e mettile in cache per l'AI (passo anche il token)
     await _loadEpicSpecs(epicIssue[0], token); // <<<  PASSO TOKEN
@@ -1761,6 +1975,38 @@ async function loadGraph(epicKeyRaw) {
       }
     });
 
+    const EXCLUDED_ASSIGNEES = [
+      'Aleksandr Novoselov',
+      'Anna Gromova',
+      'Anton Kalmykov',
+      'Dmitry Zakharov',
+      'Evgeny Soldatov',
+      'Platon Lumpov',
+      'Savelyev Sergey'
+    ];
+
+    const normalizeName = name => String(name || '')
+      .toLowerCase()
+      .replace(/[^a-z]/g, '');
+
+    const EXCLUDED_SIGNATURES = new Set(EXCLUDED_ASSIGNEES.map(normalizeName));
+    const shouldExclude = (name = '') => {
+      const normalized = normalizeName(name);
+      return normalized && EXCLUDED_SIGNATURES.has(normalized);
+    };
+
+    Array.from(nodeByKey.entries()).forEach(([key, node]) => {
+      if (shouldExclude(node?.assignee)) {
+        nodeByKey.delete(key);
+      }
+    });
+
+    Array.from(issueByKey.keys()).forEach(key => {
+      if (!nodeByKey.has(key)) {
+        issueByKey.delete(key);
+      }
+    });
+
     const nodes = Array.from(nodeByKey.values());
     const assigneeMap = new Map();
     const typeMap = new Map();
@@ -1780,16 +2026,42 @@ async function loadGraph(epicKeyRaw) {
       }
       typeMap.get(typeKey).count += 1;
     });
-    const assignees = Array.from(assigneeMap.values()).sort((a, b) => a.label.localeCompare(b.label));
+    const assignees = Array.from(assigneeMap.values())
+      .filter(item => !shouldExclude(item.label))
+      .sort((a, b) => a.label.localeCompare(b.label));
     currentGraphState.assignees = assignees;
+    logBootStep('LOAD_GRAPH_ASSIGNEES_BUILT', { 
+      assigneesCount: assignees.length, 
+      assignees: assignees.map(a => ({ id: a.id, label: a.label, count: a.count })),
+      hasBuildAssigneeFilters: typeof window.buildAssigneeFilters === 'function'
+    });
+    
     const types = Array.from(typeMap.values()).sort((a, b) => a.label.localeCompare(b.label));
     currentGraphState.types = types;
     const assigneeIds = assignees.map(a => a.id);
     activeAssigneeFilters = new Set(assigneeIds);
     const typeIds = types.map(t => t.id);
     activeTypeFilters = new Set(typeIds);
-    buildAssigneeFilters();
-    buildTypeFilters();
+    
+    logBootStep('LOAD_GRAPH_CALL_BUILD_ASSIGNEES', { 
+      willCall: !!window.buildAssigneeFilters,
+      assigneesReady: assignees.length > 0
+    });
+    if (window.buildAssigneeFilters) {
+      logBootStep('LOAD_GRAPH_BUILD_ASSIGNEES_START', {});
+      window.buildAssigneeFilters();
+      logBootStep('LOAD_GRAPH_BUILD_ASSIGNEES_OK', {});
+    } else {
+      logBootStep('LOAD_GRAPH_BUILD_ASSIGNEES_SKIP', { reason: 'window.buildAssigneeFilters not defined' });
+    }
+    
+    logBootStep('LOAD_GRAPH_CALL_BUILD_TYPES', { willCall: !!window.buildTypeFilters });
+    if (window.buildTypeFilters) {
+      window.buildTypeFilters();
+      logBootStep('LOAD_GRAPH_BUILD_TYPES_OK', {});
+    } else {
+      logBootStep('LOAD_GRAPH_BUILD_TYPES_SKIP', { reason: 'window.buildTypeFilters not defined' });
+    }
 
     const allLinks = [...hierLinks, ...relLinks, ...execLinks];
 
@@ -1805,6 +2077,22 @@ async function loadGraph(epicKeyRaw) {
     renderForceGraph(nodes, visibleLinks, epicKey, { hierLinks, relLinks });
     applyStatusFilters();
     setStatus(`Caricato: ${nodes.length} nodi, ${visibleLinks.length} collegamenti.`);
+    
+    // Fix: Se buildAssigneeFilters non era disponibile durante loadGraph, 
+    // proviamo a chiamarlo ora che l'IIFE potrebbe aver finito
+    if (typeof window.buildAssigneeFilters === 'function' && currentGraphState.assignees?.length > 0) {
+      logBootStep('LOAD_GRAPH_RETRY_BUILD_ASSIGNEES', { 
+        message: 'Retry buildAssigneeFilters dopo renderForceGraph',
+        assigneesCount: currentGraphState.assignees.length
+      });
+      window.buildAssigneeFilters();
+    }
+    if (typeof window.buildTypeFilters === 'function' && currentGraphState.types?.length > 0) {
+      logBootStep('LOAD_GRAPH_RETRY_BUILD_TYPES', { 
+        message: 'Retry buildTypeFilters dopo renderForceGraph'
+      });
+      window.buildTypeFilters();
+    }
   } catch (err) {
     console.error('Errore nel caricamento del grafico:', err);
     const errorMsg = err.message || String(err);
@@ -1936,6 +2224,281 @@ function ensureContextUi() {
   }
 }
 
+/**
+ * Crea e mostra il modale per inserire il codice della card Minor Fixes
+ */
+function showMinorFixesModal() {
+  ensureContextUi();
+  
+  // Crea il modale se non esiste
+  let modal = document.getElementById('ej-minor-fixes-modal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'ej-minor-fixes-modal';
+    modal.className = 'ej-modal';
+    modal.style.display = 'none';
+    modal.innerHTML = `
+      <h3 id="ej-minor-fixes-title">Minor Fixes</h3>
+      <p style="margin: 12px 0; color: #475569; font-size: 14px;">Qual é o código da Card de Minor Fixes?</p>
+      <p style="margin: 8px 0 16px 0; color: #64748b; font-size: 12px;">Digite aqui o número, o código do card, ou coloque o url inteiro</p>
+      <input 
+        type="text" 
+        id="ej-minor-fixes-input" 
+        placeholder="Ex: 10112, FGC-10112, ou https://facilitygrid.atlassian.net/browse/FGC-10112"
+        style="width: 100%; padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 14px; margin-bottom: 16px;"
+      />
+      <div style="display: flex; gap: 8px; justify-content: flex-end;">
+        <button class="ej-btn ej-btn-secondary" id="ej-minor-fixes-cancel">Annulla</button>
+        <button class="ej-btn ej-btn-primary" id="ej-minor-fixes-ok">OK</button>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    
+    // Event listeners
+    document.getElementById('ej-minor-fixes-cancel').addEventListener('click', hideMinorFixesModal);
+    document.getElementById('ej-minor-fixes-ok').addEventListener('click', handleMinorFixesOk);
+    
+    // Enter key sull'input
+    document.getElementById('ej-minor-fixes-input').addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') {
+        handleMinorFixesOk();
+      }
+    });
+    
+    // Gestione click backdrop per questo modale
+    const backdrop = document.getElementById('ej-ai-backdrop');
+    const backdropClickHandler = (e) => {
+      const minorFixesModal = document.getElementById('ej-minor-fixes-modal');
+      if (minorFixesModal && minorFixesModal.style.display !== 'none') {
+        hideMinorFixesModal();
+      }
+    };
+    backdrop.addEventListener('click', backdropClickHandler);
+  }
+  
+  // Carica valore salvato se esiste
+  chrome.storage.sync.get(['minorFixesCardKey'], (result) => {
+    const input = document.getElementById('ej-minor-fixes-input');
+    if (input && result.minorFixesCardKey) {
+      input.value = result.minorFixesCardKey;
+    } else if (input) {
+      input.value = '';
+    }
+    input?.focus();
+  });
+  
+  // Mostra modale
+  document.getElementById('ej-ai-backdrop').style.display = 'block';
+  modal.style.display = 'block';
+}
+
+function hideMinorFixesModal() {
+  const modal = document.getElementById('ej-minor-fixes-modal');
+  if (modal) modal.style.display = 'none';
+  document.getElementById('ej-ai-backdrop').style.display = 'none';
+  
+  // Reset select all'opzione precedente (se era Minor Fixes)
+  if (epicSelect && epicSelect.value === MINOR_FIXES_OPTION) {
+    // Ripristina all'opzione precedente o alla prima disponibile
+    const options = Array.from(epicSelect.options);
+    const prevOption = options.find(opt => opt.value !== MINOR_FIXES_OPTION && opt.value !== NO_EPIC_OPTION);
+    if (prevOption) {
+      epicSelect.value = prevOption.value;
+    } else if (options.length > 0) {
+      epicSelect.value = options[0].value;
+    }
+  }
+}
+
+// Modale: A specific Epic
+function showSpecificEpicModal() {
+  ensureContextUi();
+
+  let modal = document.getElementById('ej-specific-epic-modal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'ej-specific-epic-modal';
+    modal.className = 'ej-modal';
+    modal.style.display = 'none';
+    modal.innerHTML = `
+      <h3 id="ej-specific-epic-title">A specific Epic</h3>
+      <p style="margin: 12px 0; color: #475569; font-size: 14px;">Inserisci il codice dell'Epic.</p>
+      <p style="margin: 8px 0 16px 0; color: #64748b; font-size: 12px;">Puoi digitare il numero, la KEY completa (es. FGC-1234) o incollare l'URL completo.</p>
+      <input
+        type="text"
+        id="ej-specific-epic-input"
+        placeholder="Es: 10112, FGC-10112, oppure https://facilitygrid.atlassian.net/browse/FGC-10112"
+        style="width: 100%; padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 14px; margin-bottom: 16px;"
+      />
+      <div style="display: flex; gap: 8px; justify-content: flex-end;">
+        <button class="ej-btn ej-btn-secondary" id="ej-specific-epic-cancel">Annulla</button>
+        <button class="ej-btn ej-btn-primary" id="ej-specific-epic-ok">OK</button>
+      </div>
+    `;
+    document.body.appendChild(modal);
+
+    document.getElementById('ej-specific-epic-cancel').addEventListener('click', hideSpecificEpicModal);
+    document.getElementById('ej-specific-epic-ok').addEventListener('click', handleSpecificEpicOk);
+
+    document.getElementById('ej-specific-epic-input').addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') handleSpecificEpicOk();
+    });
+
+    const backdrop = document.getElementById('ej-ai-backdrop');
+    const backdropClickHandler = () => {
+      const m = document.getElementById('ej-specific-epic-modal');
+      if (m && m.style.display !== 'none') hideSpecificEpicModal();
+    };
+    backdrop.addEventListener('click', backdropClickHandler);
+  }
+
+  chrome.storage.sync.get(['specificEpicKey'], (result) => {
+    const input = document.getElementById('ej-specific-epic-input');
+    if (input && result.specificEpicKey) input.value = result.specificEpicKey;
+    else if (input) input.value = '';
+    input?.focus();
+  });
+
+  document.getElementById('ej-ai-backdrop').style.display = 'block';
+  modal.style.display = 'block';
+}
+
+function hideSpecificEpicModal() {
+  const modal = document.getElementById('ej-specific-epic-modal');
+  if (modal) modal.style.display = 'none';
+  document.getElementById('ej-ai-backdrop').style.display = 'none';
+
+  if (epicSelect && epicSelect.value === SPECIFIC_EPIC_OPTION) {
+    const options = Array.from(epicSelect.options);
+    const prev = options.find(opt => opt.value !== SPECIFIC_EPIC_OPTION && opt.value !== NO_EPIC_OPTION);
+    if (prev) epicSelect.value = prev.value;
+    else if (options.length > 0) epicSelect.value = options[0].value;
+  }
+}
+
+async function handleSpecificEpicOk() {
+  const input = document.getElementById('ej-specific-epic-input');
+  if (!input) return;
+
+  const raw = input.value.trim();
+  if (!raw) {
+    setStatus('Inserisci un codice valido.', false);
+    return;
+  }
+
+  const epicKey = parseCardInput(raw);
+  if (!epicKey) {
+    setStatus('Formato non valido. Usa numero, KEY (es. FGC-XXXX) o URL.', false);
+    return;
+  }
+
+  try {
+    await chrome.storage.sync.set({ specificEpicKey: epicKey });
+  } catch {}
+
+  hideSpecificEpicModal();
+
+  // Assicura che il select mostri l'epico scelto:
+  // - se non presente tra le opzioni, aggiungi un'opzione ad hoc
+  // - seleziona l'opzione corrispondente
+  if (epicSelect) {
+    let opt = Array.from(epicSelect.options).find(o => o.value === epicKey);
+    if (!opt) {
+      opt = document.createElement('option');
+      opt.value = epicKey;
+      opt.textContent = epicKey; // la etichetta verrà raffinata con il summary dopo il fetch in loadGraph
+      // Inserisci prima di SPECIFIC_EPIC_OPTION se presente, altrimenti in coda
+      const specificOpt = Array.from(epicSelect.options).find(o => o.value === SPECIFIC_EPIC_OPTION);
+      if (specificOpt) {
+        epicSelect.insertBefore(opt, specificOpt);
+      } else {
+        epicSelect.appendChild(opt);
+      }
+    }
+    epicSelect.value = epicKey;
+  }
+
+  if (window.EJ_SPECS_CACHE) window.EJ_SPECS_CACHE[epicKey] = undefined;
+  loadGraph(epicKey);
+}
+async function handleMinorFixesOk() {
+  const input = document.getElementById('ej-minor-fixes-input');
+  if (!input) return;
+  
+  const inputValue = input.value.trim();
+  if (!inputValue) {
+    setStatus('Inserisci un codice valido.', false);
+    return;
+  }
+  
+  // Parsing dell'input
+  const cardKey = parseCardInput(inputValue);
+  if (!cardKey) {
+    setStatus('Formato codice non valido. Usa: numero, FGC-XXXX, o URL completo.', false);
+    return;
+  }
+  
+  // Costruisci URL
+  const cardUrl = `https://facilitygrid.atlassian.net/browse/${cardKey}`;
+  
+  // Salva in storage
+  try {
+    await chrome.storage.sync.set({ minorFixesCardKey: cardKey });
+  } catch (e) {
+    console.error('Errore salvataggio storage:', e);
+  }
+  
+  // Chiudi modale input
+  hideMinorFixesModal();
+  
+  // Recupera la Checklist
+  const progressBar = createProgressStatusBar(`Recupero Checklist per ${cardKey}...`);
+  
+  try {
+    setStatus(`Recupero Checklist per ${cardKey}...`, true);
+    progressBar.log('Inizializzazione recupero checklist');
+    
+    const token = CURRENT_AUTH_TOKEN || (await getCreds()).token;
+    progressBar.log('Credenziali Jira verificate');
+    
+    const { items: checklistItems, debugInfo } = await fetchChecklistItems(token, cardKey, progressBar);
+    
+    // Chiudi la progress bar dopo un breve delay per mostrare il messaggio finale
+    setTimeout(() => {
+      progressBar.close();
+    }, 1500);
+    
+    if (checklistItems === null) {
+      setStatus(`Checklist non trovata per ${cardKey}`, false);
+      showChecklistModal(cardKey, [], debugInfo);
+    } else {
+      setStatus(`Checklist recuperata: ${checklistItems.length} elementi`, true);
+      showChecklistModal(cardKey, checklistItems, debugInfo);
+    }
+  } catch (error) {
+    console.error('Errore recupero Checklist:', error);
+    setStatus(`Errore nel recupero Checklist: ${error.message || error}`, false);
+    progressBar.log(`Errore: ${error.message || String(error)}`, 'error');
+    
+    // Chiudi la progress bar dopo un breve delay
+    setTimeout(() => {
+      progressBar.close();
+    }, 2000);
+    
+    // Mostra modale con errore
+    ensureContextUi();
+    const modal = document.getElementById('ej-ai-modal');
+    const titleEl = document.getElementById('ej-ai-modal-title');
+    const textEl = document.getElementById('ej-ai-modal-text');
+    if (modal && titleEl && textEl) {
+      titleEl.textContent = `Errore - ${cardKey}`;
+      textEl.innerHTML = `<p style="color: #dc2626;">Impossibile recuperare la Checklist.</p><p style="color: #64748b; font-size: 12px;">${escapeHtml(error.message || String(error))}</p>`;
+      document.getElementById('ej-ai-backdrop').style.display = 'block';
+      modal.style.display = 'block';
+    }
+  }
+}
+
 function showModal(text) {
   const elem = document.getElementById('ej-ai-modal-text');
   // Supporto HTML: se il testo contiene <, usa innerHTML, altrimenti textContent
@@ -2043,7 +2606,8 @@ async function inspectNodeDetails(nodeData) {
   }
 }
 
-function renderForceGraph(nodes, links, epicKey, groups = { hierLinks: [], relLinks: [] }) {
+function renderForceGraph(nodes, links, epicKey, groups = { hierLinks: [], relLinks: [] }, options = {}) {
+  const layoutMode = options.layout || 'default';
   const svgNode = svg.node();
   svg.selectAll('*').remove();
 
@@ -2431,15 +2995,39 @@ ${exp}
         return 0.8;
       });
 
+  const linkForce = d3.forceLink(links)
+    .id(d => d.id)
+    .distance(l => window.EJ_LAYOUT.linkDistance(l, nodes))
+    .strength(l => window.EJ_LAYOUT.linkStrength(l));
+
   simulation = d3.forceSimulation(nodes)
-    .force('link', d3.forceLink(links)
-      .id(d => d.id)
-      .distance(l => window.EJ_LAYOUT.linkDistance(l, nodes))
-      .strength(l => window.EJ_LAYOUT.linkStrength(l))
-    )
-    .force('charge', d3.forceManyBody().strength(d => window.EJ_LAYOUT.nodeCharge(d)))
-    .force('center', d3.forceCenter(width / 2, height / 2))
-    .force('collision', d3.forceCollide().radius(d => d.id === epicKey ? 10 : 7));
+    .force('link', linkForce)
+    .force('center', d3.forceCenter(width / 2, height / 2));
+
+  if (layoutMode === 'grid') {
+    const { clusterIndex, clusterCenters, clusterSizes } = buildClusterLayout(nodes, links);
+    const clusterForce = createClusterForce(nodes, clusterIndex, clusterCenters, 0.18);
+    simulation
+      .force('x', d3.forceX((d) => {
+        const center = clusterCenters[clusterIndex.get(d.id)];
+        return center ? center.x : width / 2;
+      }).strength(0.55))
+      .force('y', d3.forceY((d) => {
+        const center = clusterCenters[clusterIndex.get(d.id)];
+        return center ? center.y : height / 2;
+      }).strength(0.65))
+      .force('cluster', clusterForce)
+      .force('charge', d3.forceManyBody().strength(-50))
+      .force('collision', d3.forceCollide().radius(d => {
+        const clusterId = clusterIndex.get(d.id);
+        const size = clusterSizes.get(clusterId) || 1;
+        return 12 + Math.sqrt(size) * 6;
+      }));
+  } else {
+    simulation
+      .force('charge', d3.forceManyBody().strength(d => window.EJ_LAYOUT.nodeCharge(d)))
+      .force('collision', d3.forceCollide().radius(d => d.id === epicKey ? 10 : 7));
+  }
 
   const node = stage.append('g')
     .selectAll('g.node')
@@ -3069,6 +3657,93 @@ ${exp}
   svg.node().addEventListener('wheel', (e) => { if (e.ctrlKey) e.preventDefault(); }, { passive: false });
 }
 
+function buildClusterLayout(nodes, links) {
+  if (!Array.isArray(nodes) || !nodes.length) {
+    return {
+      clusterIndex: new Map(),
+      clusterCenters: [{ x: width / 2, y: height / 2 }],
+      clusterSizes: new Map()
+    };
+  }
+
+  const adjacency = new Map();
+  nodes.forEach(node => adjacency.set(node.id, new Set()));
+
+  links.forEach(link => {
+    const src = typeof link.source === 'object' ? link.source.id || link.source.key : link.source;
+    const tgt = typeof link.target === 'object' ? link.target.id || link.target.key : link.target;
+    if (!src || !tgt) return;
+    if (!adjacency.has(src) || !adjacency.has(tgt)) return;
+    adjacency.get(src).add(tgt);
+    adjacency.get(tgt).add(src);
+  });
+
+  const visited = new Set();
+  const clusters = [];
+  nodes.forEach(node => {
+    if (visited.has(node.id)) return;
+    const stack = [node.id];
+    const component = [];
+    visited.add(node.id);
+    while (stack.length) {
+      const current = stack.pop();
+      component.push(current);
+      const neighbours = adjacency.get(current);
+      if (!neighbours) continue;
+      neighbours.forEach(next => {
+        if (!visited.has(next)) {
+          visited.add(next);
+          stack.push(next);
+        }
+      });
+    }
+    clusters.push(component);
+  });
+
+  const clusterIndex = new Map();
+  const clusterSizes = new Map();
+  clusters.forEach((cluster, idx) => {
+    clusterSizes.set(idx, cluster.length);
+    cluster.forEach(id => clusterIndex.set(id, idx));
+  });
+
+  const clusterCount = clusters.length;
+  const columns = Math.max(1, Math.ceil(Math.sqrt(clusterCount)));
+  const rows = Math.max(1, Math.ceil(clusterCount / columns));
+  const baseSpacingX = 220 / 3;
+  const baseSpacingY = 180 / 3;
+  const offsetX = width / 2 - ((columns - 1) * baseSpacingX) / 2;
+  const offsetY = height / 2 - ((rows - 1) * baseSpacingY) / 2;
+  const clusterCenters = clusters.map((cluster, idx) => ({
+    x: offsetX + (idx % columns) * baseSpacingX,
+    y: offsetY + Math.floor(idx / columns) * baseSpacingY
+  }));
+
+  nodes.forEach(node => {
+    const clusterId = clusterIndex.get(node.id);
+    const center = clusterCenters[clusterId];
+    if (!center) return;
+    if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) {
+      node.x = center.x + (Math.random() - 0.5) * 30;
+      node.y = center.y + (Math.random() - 0.5) * 30;
+    }
+  });
+
+  return { clusters, clusterIndex, clusterCenters, clusterSizes };
+}
+
+function createClusterForce(nodes, clusterIndex, clusterCenters, strength = 0.15) {
+  return function clusterForce(alpha) {
+    nodes.forEach(node => {
+      const clusterId = clusterIndex.get(node.id);
+      const center = clusterCenters[clusterId];
+      if (!center || !Number.isFinite(node.x) || !Number.isFinite(node.y)) return;
+      node.vx += (center.x - node.x) * strength * alpha;
+      node.vy += (center.y - node.y) * strength * alpha;
+    });
+  };
+}
+
 function makeDrag(sim) {
   function dragstarted(event, d) {
     if (!event.active) sim.alphaTarget(0.3).restart();
@@ -3374,47 +4049,109 @@ async function fetchSingleDescription(token, key) {
 
 // UI wiring
 (async () => {
+  logBootStep('BOOT_START', { message: 'Inizio bootstrap applicazione' });
+  
   // Rinnovo cache ad ogni apertura della pagina
   window.EJ_SPECS_CACHE = {};
   window.__EJ_LAST_EPIC_RAW__ = {};
   
+  logBootStep('BOOT_INIT_CACHE', { message: 'Cache inizializzate' });
+  
   ensureContextUi(); // garantisce che backdrop+modal esistano sempre
+  logBootStep('BOOT_CONTEXT_UI', { message: 'Context UI assicurato' });
+  
+  epicSelect = epicSelect || document.getElementById('epicSelect');
+  if (!epicSelect) {
+    logBootStep('BOOT_ERROR', { error: 'Elemento epicSelect non trovato nel DOM' });
+    console.error('Elemento epicSelect non trovato nel DOM.');
+    return;
+  }
+  logBootStep('BOOT_EPIC_SELECT_FOUND', { element: !!epicSelect });
   
   const params = new URLSearchParams(location.search);
-  const epicParam = params.get('epic');
+  
+  // Progress bar per il primo caricamento (sottile, alla base dell'header)
+  const bootProgress = createProgressStatusBar('Avvio…', { variant: 'thin' });
+  logBootStep('BOOT_PROGRESS_BAR', { message: 'Progress bar creata' });
 
   epicSelect.addEventListener('change', () => {
     const opt = epicSelect.value;
     if (!opt) return;
+    
+    // Gestione Minor Fixes
+    if (opt === MINOR_FIXES_OPTION) {
+      showMinorFixesModal();
+      return;
+    }
+    
+    // Gestione A specific Epic
+    if (opt === SPECIFIC_EPIC_OPTION) {
+      showSpecificEpicModal();
+      return;
+    }
+    
     // reset soft per evitare riuso di SPEC vecchie
     if (window.EJ_SPECS_CACHE) window.EJ_SPECS_CACHE[opt] = undefined;
     loadGraph(opt);
   });
 
   try {
+    bootProgress.update('Verifica credenziali…', 10);
+    logBootStep('BOOT_GET_CREDS_START', { message: 'Richiesta credenziali' });
     const { token } = await getCreds();
+    logBootStep('BOOT_GET_CREDS_OK', { hasToken: !!token });
+    
+    bootProgress.update('Carico epici della sprint attiva…', 25);
     setStatus('Carico epici della sprint attiva…');
+    logBootStep('BOOT_FETCH_EPICS_START', { message: 'Fetch epici sprint attiva' });
     const epics = await fetchActiveSprintEpics(token);
-    epicSelect.innerHTML = '';
-    epics.forEach(e => {
-      const opt = document.createElement('option');
-      opt.value = e.key; opt.textContent = `${e.key} — ${e.summary || ''}`;
-      epicSelect.appendChild(opt);
-    });
-    if (!epics.length) {
-      const opt = document.createElement('option');
-      opt.value = ''; opt.textContent = 'Nessun epico in sprint attiva';
-      epicSelect.appendChild(opt);
-    }
+    logBootStep('BOOT_FETCH_EPICS_OK', { count: epics.length, keys: epics.map(e => e.key) });
+    
+    bootProgress.update(`Trovati ${epics.length} epici`, 45);
+    const epicOptions = epics.map(e => ({ value: e.key, label: `${e.key} — ${e.summary || ''}` }));
+    logBootStep('BOOT_POPULATE_SELECT_START', { optionsCount: epicOptions.length });
+    populateEpicSelect(epicOptions);
+    logBootStep('BOOT_POPULATE_SELECT_OK', { message: 'Select popolato' });
+    
+    const epicParam = params.get('epic');
     if (epicParam) {
       const norm = normalizeEpicKey(epicParam);
       const found = epics.find(e => e.key === norm);
       if (found) epicSelect.value = norm;
     }
-    if (epicSelect.value) loadGraph(epicSelect.value); else setStatus('Select Epics in Actual Sprint', true);
+    if (!epicSelect.value && epicOptions.length) {
+      epicSelect.value = epicOptions[0].value;
+    }
+    if (!epicSelect.value) {
+      epicSelect.value = NO_EPIC_OPTION;
+    }
+    
+    logBootStep('BOOT_SELECTED_EPIC', { 
+      selectedEpic: epicSelect.value,
+      hasBuildAssigneeFilters: typeof window.buildAssigneeFilters === 'function',
+      hasBuildTypeFilters: typeof window.buildTypeFilters === 'function'
+    });
+    
+    if (epicSelect.value) {
+      bootProgress.update(`Carico grafo per ${epicSelect.value}…`, 65);
+      logBootStep('BOOT_LOAD_GRAPH_START', { epicKey: epicSelect.value });
+      await loadGraph(epicSelect.value);
+      logBootStep('BOOT_LOAD_GRAPH_OK', { epicKey: epicSelect.value });
+      bootProgress.update('Completato', 100);
+    } else {
+      setStatus('Select Epics in Actual Sprint', true);
+      bootProgress.update('In attesa di selezione…', 80);
+    }
   } catch (e) {
+    logBootStep('BOOT_ERROR', { error: e.message, stack: e.stack });
     console.error(e);
+    populateEpicSelect();
     setStatus('Impossibile caricare gli epici della sprint attiva. Verifica credenziali.', false);
+    bootProgress.update('Errore durante il caricamento', 100);
+    await loadGraph(NO_EPIC_OPTION);
+  } finally {
+    logBootStep('BOOT_FINALLY', { message: 'Bootstrap completato' });
+    setTimeout(() => bootProgress.close(), 600);
   }
 
   function buildSpecEntries(meta) {
@@ -3497,7 +4234,17 @@ async function fetchSingleDescription(token, key) {
   const openSettingsBtn = document.getElementById('openSettings');
   openSettingsBtn?.addEventListener('click', () => chrome.runtime.openOptionsPage());
   copyBtn?.addEventListener('click', async () => {
-    const debug = lastApiDebug || { info: 'Nessuna chiamata ancora effettuata.' };
+    const debug = {
+      lastApiCall: lastApiDebug || { info: 'Nessuna chiamata ancora effettuata.' },
+      bootLog: window.EJ_BOOT_LOG || [],
+      summary: {
+        bootLogEntries: (window.EJ_BOOT_LOG || []).length,
+        hasBuildAssigneeFilters: typeof window.buildAssigneeFilters === 'function',
+        hasBuildTypeFilters: typeof window.buildTypeFilters === 'function',
+        currentEpic: CURRENT_EPIC_KEY,
+        assigneesCount: currentGraphState?.assignees?.length || 0
+      }
+    };
     const text = JSON.stringify(debug, null, 2);
     try {
       await navigator.clipboard.writeText(text);
@@ -3591,12 +4338,22 @@ async function fetchSingleDescription(token, key) {
   }
 
   function buildAssigneeFilters() {
+    logBootStep('BUILD_ASSIGNEES_ENTRY', { 
+      hasPanel: !!document.getElementById('assigneePanel'),
+      hasList: !!document.getElementById('assigneeFilterList'),
+      assigneesCount: (currentGraphState?.assignees || []).length
+    });
+    
     const panel = document.getElementById('assigneePanel');
     const list = document.getElementById('assigneeFilterList');
     const allBtn = document.getElementById('assigneeSelectAll');
     const noneBtn = document.getElementById('assigneeSelectNone');
-    if (!panel || !list) return;
+    if (!panel || !list) {
+      logBootStep('BUILD_ASSIGNEES_EARLY_RETURN', { reason: 'Panel o list non trovati', hasPanel: !!panel, hasList: !!list });
+      return;
+    }
     const assignees = currentGraphState.assignees || [];
+    logBootStep('BUILD_ASSIGNEES_START', { assigneesCount: assignees.length, assignees: assignees.map(a => ({ id: a.id, label: a.label })) });
 
     if (!panel.dataset.eventsBound) {
       panel.dataset.eventsBound = '1';
@@ -3670,6 +4427,10 @@ async function fetchSingleDescription(token, key) {
     });
 
     updateHoverHighlights();
+    logBootStep('BUILD_ASSIGNEES_COMPLETE', { 
+      itemsAdded: assignees.length,
+      listChildrenCount: list.children.length
+    });
   }
 
   function buildTypeFilters() {
@@ -3753,6 +4514,1658 @@ async function fetchSingleDescription(token, key) {
   }
 
   window.getInitials = getInitials;
+  logBootStep('BOOT_EXPORT_BUILD_ASSIGNEES', { 
+    message: 'Esportazione buildAssigneeFilters su window',
+    isFunction: typeof buildAssigneeFilters === 'function'
+  });
   window.buildAssigneeFilters = buildAssigneeFilters;
+  logBootStep('BOOT_EXPORT_BUILD_ASSIGNEES_OK', { 
+    windowHasIt: typeof window.buildAssigneeFilters === 'function'
+  });
+  
+  logBootStep('BOOT_EXPORT_BUILD_TYPES', { 
+    message: 'Esportazione buildTypeFilters su window',
+    isFunction: typeof buildTypeFilters === 'function'
+  });
   window.buildTypeFilters = buildTypeFilters;
+  logBootStep('BOOT_EXPORT_BUILD_TYPES_OK', { 
+    windowHasIt: typeof window.buildTypeFilters === 'function'
+  });
+  
+  // Fix: Se loadGraph è già stato chiamato e ci sono assignees pronti, 
+  // chiamiamo buildAssigneeFilters ora che è disponibile
+  if (currentGraphState?.assignees?.length > 0) {
+    logBootStep('BOOT_IIFE_RETRY_BUILD_ASSIGNEES', { 
+      message: 'IIFE finito: retry buildAssigneeFilters se loadGraph già chiamato',
+      assigneesCount: currentGraphState.assignees.length
+    });
+    // Usa setTimeout per dare tempo al DOM di essere pronto
+    setTimeout(() => {
+      if (typeof window.buildAssigneeFilters === 'function' && currentGraphState?.assignees?.length > 0) {
+        logBootStep('BOOT_IIFE_CALL_BUILD_ASSIGNEES', {});
+        window.buildAssigneeFilters();
+      }
+      if (typeof window.buildTypeFilters === 'function' && currentGraphState?.types?.length > 0) {
+        logBootStep('BOOT_IIFE_CALL_BUILD_TYPES', {});
+        window.buildTypeFilters();
+      }
+    }, 50);
+  }
 })();
+
+async function loadNoEpicCards(token) {
+  try {
+    setStatus('Carico card senza epic…');
+    const jql = 'sprint in openSprints() AND issuetype != Epic AND parent is EMPTY AND "Epic Link" is EMPTY AND status NOT IN (Closed, "Rejected & Closed", "Pending Development", Backlog)';
+    const issues = await jiraSearch(token, jql).catch(() => []);
+
+    if (!Array.isArray(issues) || issues.length === 0) {
+      svg.selectAll('*').remove();
+      currentGraphState.nodesByKey = new Map();
+      currentGraphState.nodes = [];
+      currentGraphState.links = [];
+      currentGraphState.aiLayer = null;
+      currentGraphState.assignees = [];
+      activeAssigneeFilters = new Set();
+      activeTypeFilters = new Set();
+      buildAssigneeFilters();
+      buildTypeFilters();
+      applyStatusFilters();
+      setStatus('Nessuna card senza epic nella sprint attiva.', true);
+      return;
+    }
+
+    const nodeByKey = new Map();
+    issues.forEach(issue => {
+      if (!issue || !issue.key) return;
+      const issuetypeName = issue.fields?.issuetype?.name || '';
+      const lower = String(issuetypeName || '').toLowerCase();
+      let category = getCategoryFromIssueType(issuetypeName);
+      if (lower.includes('mobile') && category === 'task') category = 'mobile_task';
+      if (lower.includes('mobile') && category === 'bug') category = 'mobile_bug';
+      if (lower.includes('document')) category = 'document';
+      if (lower.includes('test execution')) category = 'test_execution';
+      if (lower === 'test') category = 'test';
+      nodeByKey.set(issue.key, {
+        id: issue.key,
+        key: issue.key,
+        summary: issue.fields?.summary || '',
+        type: 'issue',
+        issuetype: issuetypeName,
+        issuetypeIcon: issue.fields?.issuetype?.iconUrl || '',
+        category,
+        status: normalizeStatusName(issue.fields?.status?.name),
+        assignee: (issue.fields?.assignee?.displayName || issue.fields?.assignee?.name || '').trim(),
+        assigneeId: issue.fields?.assignee?.accountId || issue.fields?.assignee?.name || '',
+        assigneeAvatar: issue.fields?.assignee?.avatarUrls?.['24x24'] || issue.fields?.assignee?.avatarUrls?.['32x32'] || ''
+      });
+    });
+
+    const issueByKey = new Map(issues.map(it => [it.key, it]));
+    const relLinks = [];
+    const pairSet = new Set();
+    issueByKey.forEach(src => {
+      if (!nodeByKey.has(src.key)) return;
+      const linksArr = src.fields?.issuelinks || [];
+      linksArr.forEach(l => {
+        const linked = l.outwardIssue || l.inwardIssue;
+        if (!linked || !linked.key) return;
+        if (!nodeByKey.has(linked.key)) return;
+        const a = src.key;
+        const b = linked.key;
+        const undirected = a < b ? `${a}--${b}` : `${b}--${a}`;
+        if (pairSet.has(undirected)) return;
+        relLinks.push({ source: a, target: b, kind: 'rel', label: l.type?.name || '' });
+        pairSet.add(undirected);
+      });
+    });
+
+    const nodes = Array.from(nodeByKey.values());
+
+    const assigneeMap = new Map();
+    const typeMap = new Map();
+    nodes.forEach(node => {
+      const id = getAssigneeKey(node);
+      const label = (node.assignee || '').trim() || 'Unassigned';
+      const avatar = node.assigneeAvatar || '';
+      if (!assigneeMap.has(id)) {
+        assigneeMap.set(id, { id, label, avatar, count: 0 });
+      }
+      assigneeMap.get(id).count += 1;
+
+      const typeKey = (node.issuetype || '').trim() || 'Unknown';
+      const typeIcon = node.issuetypeIcon || '';
+      if (!typeMap.has(typeKey)) {
+        typeMap.set(typeKey, { id: typeKey, label: typeKey, icon: typeIcon, count: 0 });
+      }
+      typeMap.get(typeKey).count += 1;
+    });
+
+    const assignees = Array.from(assigneeMap.values()).sort((a, b) => a.label.localeCompare(b.label));
+    currentGraphState.assignees = assignees;
+    const types = Array.from(typeMap.values()).sort((a, b) => a.label.localeCompare(b.label));
+    currentGraphState.types = types;
+    const assigneeIds = assignees.map(a => a.id);
+    activeAssigneeFilters = new Set(assigneeIds);
+    const typeIds = types.map(t => t.id);
+    activeTypeFilters = new Set(typeIds);
+    buildAssigneeFilters();
+    buildTypeFilters();
+
+    const visibleLinks = relLinks;
+    renderForceGraph(nodes, visibleLinks, null, { hierLinks: [], relLinks }, { layout: 'grid' });
+    setStatus(`Caricate ${nodes.length} card senza epic.`);
+    applyStatusFilters();
+  } catch (err) {
+    console.error('Errore caricamento card senza epic:', err);
+    setStatus(err.message || 'Errore nel caricamento delle card senza epic.', false);
+  }
+}
+
+/**
+ * Estrae il codice card da input vari (numero, codice completo, o URL)
+ * @param {string} input - Input dell'utente (es: "10112", "FGC-10112", o URL completo)
+ * @returns {string|null} - Codice card normalizzato (es: "FGC-10112") o null se non valido
+ */
+function parseCardInput(input) {
+  if (!input || typeof input !== 'string') return null;
+  
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+  
+  // Caso 1: URL completo
+  const urlMatch = trimmed.match(/\/browse\/([A-Z]+-\d+)/i);
+  if (urlMatch) {
+    return urlMatch[1].toUpperCase();
+  }
+  
+  // Caso 2: Codice completo (es: FGC-10112)
+  const codeMatch = trimmed.match(/^([A-Z]+)-(\d+)$/i);
+  if (codeMatch) {
+    return codeMatch[1].toUpperCase() + '-' + codeMatch[2];
+  }
+  
+  // Caso 3: Solo numero (es: 10112) - assumiamo prefisso FGC
+  const numMatch = trimmed.match(/^(\d+)$/);
+  if (numMatch) {
+    return 'FGC-' + numMatch[1];
+  }
+  
+  return null;
+}
+
+/**
+ * Estrae testo da un oggetto ADF (Atlassian Document Format)
+ * @param {Object} node - Nodo ADF
+ * @returns {string} - Testo estratto
+ */
+function extractADFText(node) {
+  if (!node) return '';
+  if (typeof node === 'string') return node;
+  if (Array.isArray(node)) return node.map(extractADFText).join(' ');
+  if (node.type === 'text') return node.text || '';
+  if (node.content) return extractADFText(node.content);
+  return '';
+}
+
+/**
+ * Parsa il testo della checklist in elementi strutturati
+ * Il formato atteso è: "Nome - Status - Key - Descrizione"
+ * Esempio: "Hugo - Bug Return To Do - FGC-3764 - When we select..."
+ * @param {string} text - Testo della checklist
+ * @returns {Array} - Array di elementi parsati
+ */
+function parseChecklistText(text) {
+  if (!text || typeof text !== 'string') return [];
+  
+  const items = [];
+  // Dividi per righe (può essere separato da \n, \r\n, o altri separatori)
+  const lines = text.split(/\r?\n/).filter(line => line.trim());
+  
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    
+    // Prova a parsare il formato: "Nome - Status - Key - Descrizione"
+    // Pattern: cattura tutto fino al primo " - ", poi status, poi key (FGC-XXXX), poi resto
+    const match = trimmed.match(/^(.+?)\s*-\s*(.+?)\s*-\s*([A-Z]+-\d+)\s*-\s*(.+)$/);
+    
+    if (match) {
+      const [, name, status, key, description] = match;
+      items.push({
+        name: name.trim(),
+        status: status.trim(),
+        key: key.trim(),
+        description: description.trim(),
+        fullText: trimmed
+      });
+    } else {
+      // Se non matcha il formato completo, prova a cercare almeno la key
+      const keyMatch = trimmed.match(/([A-Z]+-\d+)/);
+      if (keyMatch) {
+        items.push({
+          name: trimmed,
+          status: null,
+          key: keyMatch[1],
+          description: null,
+          fullText: trimmed
+        });
+      } else {
+        // Fallback: usa l'intera riga come nome
+        items.push({
+          name: trimmed,
+          status: null,
+          key: null,
+          description: null,
+          fullText: trimmed
+        });
+      }
+    }
+  }
+  
+  return items;
+}
+
+/**
+ * Recupera le proprietà dell'issue (dove potrebbero essere salvate le checklist)
+ * @param {string} token - Token di autenticazione
+ * @param {string} issueKey - Chiave dell'issue
+ * @returns {Object|null} - Proprietà della checklist o null
+ */
+async function fetchIssueProperties(token, issueKey) {
+  try {
+    // Elenca tutte le proprietà dell'issue
+    const url = `${JIRA_BASE}/rest/api/3/issue/${encodeURIComponent(issueKey)}/properties`;
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Basic ${token}`,
+        'Accept': 'application/json'
+      },
+      credentials: 'omit',
+      cache: 'no-store',
+      mode: 'cors'
+    });
+    
+    if (!res.ok) {
+      console.warn(`Errore nel recupero proprietà v3: ${res.status}`);
+      // Prova anche con API v2
+      const urlV2 = `${JIRA_BASE}/rest/api/2/issue/${encodeURIComponent(issueKey)}/properties`;
+      const resV2 = await fetch(urlV2, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Basic ${token}`,
+          'Accept': 'application/json'
+        },
+        credentials: 'omit',
+        cache: 'no-store',
+        mode: 'cors'
+      });
+      
+      if (!resV2.ok) {
+        return null;
+      }
+      
+      const propertiesV2 = await resV2.json();
+      // API v2 restituisce un array di chiavi
+      if (Array.isArray(propertiesV2)) {
+        const checklistData = {};
+        for (const key of propertiesV2) {
+          if (key && /checklist/i.test(key)) {
+            try {
+              const propUrl = `${JIRA_BASE}/rest/api/2/issue/${encodeURIComponent(issueKey)}/properties/${encodeURIComponent(key)}`;
+              const propRes = await fetch(propUrl, {
+                method: 'GET',
+                headers: {
+                  'Authorization': `Basic ${token}`,
+                  'Accept': 'application/json'
+                },
+                credentials: 'omit',
+                cache: 'no-store',
+                mode: 'cors'
+              });
+              
+              if (propRes.ok) {
+                const propData = await propRes.json();
+                checklistData[key] = propData;
+              }
+            } catch (e) {
+              console.warn(`Errore nel recupero proprietà ${key}:`, e);
+            }
+          }
+        }
+        return Object.keys(checklistData).length > 0 ? checklistData : null;
+      }
+      
+      return null;
+    }
+    
+    const properties = await res.json();
+    
+    // Se l'API v3 restituisce un oggetto con 'keys', usa quello
+    // Altrimenti potrebbe essere un array diretto
+    let allKeys = [];
+    if (properties.keys && Array.isArray(properties.keys)) {
+      allKeys = properties.keys;
+    } else if (Array.isArray(properties)) {
+      allKeys = properties;
+    }
+    
+    // Recupera TUTTE le proprietà (non solo quelle con "checklist" nel nome)
+    // perché potrebbero avere nomi diversi
+    const allProperties = {};
+    for (const key of allKeys) {
+      try {
+        const propUrl = `${JIRA_BASE}/rest/api/3/issue/${encodeURIComponent(issueKey)}/properties/${encodeURIComponent(key)}`;
+        const propRes = await fetch(propUrl, {
+          method: 'GET',
+          headers: {
+            'Authorization': `Basic ${token}`,
+            'Accept': 'application/json'
+          },
+          credentials: 'omit',
+          cache: 'no-store',
+          mode: 'cors'
+        });
+        
+        if (propRes.ok) {
+          const propData = await propRes.json();
+          allProperties[key] = propData;
+        }
+      } catch (e) {
+        console.warn(`Errore nel recupero proprietà ${key}:`, e);
+      }
+    }
+    
+    // Filtra quelle che potrebbero essere checklist
+    const checklistData = {};
+    Object.entries(allProperties).forEach(([key, value]) => {
+      // Cerca "checklist" nel nome o nel contenuto
+      if (/checklist/i.test(key) || 
+          (typeof value === 'string' && /checklist/i.test(value)) ||
+          (typeof value === 'object' && JSON.stringify(value).toLowerCase().includes('checklist'))) {
+        checklistData[key] = value;
+      }
+    });
+    
+    return Object.keys(checklistData).length > 0 ? checklistData : (Object.keys(allProperties).length > 0 ? allProperties : null);
+    
+  } catch (error) {
+    console.error('Errore nel recupero proprietà issue:', error);
+    return null;
+  }
+}
+
+/**
+ * Estrae gli elementi della Checklist dall'endpoint herokuapp.com (app Checklistr2)
+ * @param {string} issueKey - Chiave dell'issue (es: "FGC-10112")
+ * @param {Object} progressBar - Oggetto progress bar opzionale per aggiornamenti di stato
+ * @returns {Object} - {items: Array|null, debugInfo: Object}
+ */
+async function fetchChecklistFromHerokuapp(issueKey, progressBar = null) {
+  const debugInfo = {
+    source: 'herokuapp.com',
+    url: null,
+    status: null,
+    error: null,
+    itemsFound: 0,
+    method: 'direct'
+  };
+  
+  let createdTabId = null;
+  
+  try {
+    const url = `https://issue-checklist-prod-2.herokuapp.com/issue/${encodeURIComponent(issueKey)}/panel`;
+    debugInfo.url = url;
+    
+    if (progressBar) {
+      progressBar.update('Cercando sessione Jira...', 10);
+      progressBar.log('Verifico se esiste una tab Jira aperta');
+    }
+    
+    // PROVA 1: Inietta uno script nella pagina Jira per fare la richiesta dal contesto della pagina
+    // (dove i cookie di sessione sono disponibili)
+    try {
+      let jiraTab = null;
+      const tabs = await chrome.tabs.query({ url: 'https://*.atlassian.net/*' });
+      
+      if (tabs && tabs.length > 0) {
+        // Usa la prima scheda Jira trovata
+        jiraTab = tabs[0];
+        debugInfo.method = 'injected-script-existing-tab';
+        if (progressBar) {
+          progressBar.update('Tab Jira trovata, verifico disponibilità...', 20);
+          progressBar.log(`Tab Jira trovata: ${jiraTab.url}`, 'success');
+        }
+        
+        // Verifica che il content script sia pronto (con retry più lungo)
+        let contentScriptReady = false;
+        for (let attempt = 0; attempt < 10; attempt++) {
+          try {
+            const pingResult = await Promise.race([
+              chrome.tabs.sendMessage(jiraTab.id, { action: 'ping' }),
+              new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout ping')), 5000))
+            ]);
+            if (pingResult === 'pong' || pingResult) {
+              contentScriptReady = true;
+              if (progressBar) {
+                progressBar.log('Content script pronto', 'success');
+              }
+              break;
+            }
+          } catch (e) {
+            if (progressBar && attempt < 9) {
+              progressBar.log(`Tentativo ${attempt + 1}/10: content script non ancora pronto, attendo...`, 'warning');
+            }
+            await new Promise(resolve => setTimeout(resolve, 3000));
+          }
+        }
+        
+        if (!contentScriptReady && progressBar) {
+          progressBar.log('Content script non risponde, procedo comunque...', 'warning');
+        }
+        
+        if (progressBar) {
+          progressBar.update('Preparo navigazione alla pagina issue...', 25);
+        }
+      } else {
+        // Nessuna tab Jira trovata, apri una in background
+        // Prima apriamo una pagina Jira per avere i cookie di sessione, poi navighiamo al pannello
+        const jiraBaseUrl = 'https://facilitygrid.atlassian.net';
+        if (progressBar) {
+          progressBar.update('Apertura tab Jira in background...', 15);
+          progressBar.log(`Nessuna tab Jira trovata, apro una tab Jira per la sessione`);
+        }
+        
+        const newTab = await chrome.tabs.create({
+          url: jiraBaseUrl,
+          active: false
+        });
+        createdTabId = newTab.id;
+        jiraTab = newTab;
+        debugInfo.method = 'injected-script-new-tab';
+        
+        if (progressBar) {
+          progressBar.update('Attendo caricamento pagina Jira...', 20);
+          progressBar.log(`Navigazione a ${jiraBaseUrl}`);
+        }
+        
+        // Attendi che la tab sia completamente caricata (timeout aumentato a 240 secondi)
+        await new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            reject(new Error('Timeout caricamento tab Jira (240s)'));
+          }, 240000);
+          
+          const checkTab = (tabId, changeInfo) => {
+            if (tabId === newTab.id && changeInfo.status === 'complete') {
+              chrome.tabs.onUpdated.removeListener(checkTab);
+              clearTimeout(timeout);
+              resolve();
+            }
+          };
+          
+          chrome.tabs.onUpdated.addListener(checkTab);
+          
+          // Controlla se è già caricata
+          chrome.tabs.get(newTab.id, (tab) => {
+            if (tab.status === 'complete') {
+              chrome.tabs.onUpdated.removeListener(checkTab);
+              clearTimeout(timeout);
+              resolve();
+            }
+          });
+        });
+        
+        if (progressBar) {
+          progressBar.update('Pagina Jira caricata, navigo al pannello checklist...', 30);
+          progressBar.log('Pagina Jira caricata, ora navigo al pannello checklist');
+        }
+        
+        // Ora navighiamo al pannello checklist (dove il meta tag è presente)
+        const panelUrl = `https://issue-checklist-prod-2.herokuapp.com/issue/${encodeURIComponent(issueKey)}/panel`;
+        await chrome.tabs.update(newTab.id, { url: panelUrl });
+        
+        // Attendi che il pannello sia caricato
+        await new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            reject(new Error('Timeout caricamento pannello checklist (240s)'));
+          }, 240000);
+          
+          const checkTab = (tabId, changeInfo) => {
+            if (tabId === newTab.id && changeInfo.status === 'complete') {
+              chrome.tabs.onUpdated.removeListener(checkTab);
+              clearTimeout(timeout);
+              resolve();
+            }
+          };
+          
+          chrome.tabs.onUpdated.addListener(checkTab);
+          
+          chrome.tabs.get(newTab.id, (tab) => {
+            if (tab.status === 'complete' && tab.url && tab.url.includes(panelUrl)) {
+              chrome.tabs.onUpdated.removeListener(checkTab);
+              clearTimeout(timeout);
+              resolve();
+            }
+          });
+        });
+        
+        if (progressBar) {
+          progressBar.update('Pannello caricato, attendo checklist...', 40);
+          progressBar.log('Pannello checklist caricato, attendo che meta tag prefetchedItems appaia nel DOM');
+        }
+      }
+      
+      if (jiraTab) {
+        // Naviga direttamente all'URL del pannello herokuapp.com per avere il meta tag nel DOM
+        // Il meta tag prefetchedItems è presente solo quando viene caricato il pannello dell'app Checklistr2
+        const panelUrl = `https://issue-checklist-prod-2.herokuapp.com/issue/${encodeURIComponent(issueKey)}/panel`;
+        const currentUrl = jiraTab.url || '';
+        
+        if (!currentUrl.includes(panelUrl) && !currentUrl.includes(`/browse/${issueKey}`)) {
+          if (progressBar) {
+            progressBar.update('Navigazione al pannello checklist...', 35);
+            progressBar.log(`Navigo al pannello checklist: ${panelUrl}`);
+          }
+          
+          // Naviga direttamente al pannello checklist (dove il meta tag è presente)
+          await chrome.tabs.update(jiraTab.id, { url: panelUrl });
+          
+          // Attendi che la pagina sia caricata
+          await new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => {
+              reject(new Error('Timeout navigazione pannello checklist (240s)'));
+            }, 240000);
+            
+            const checkTab = (tabId, changeInfo) => {
+              if (tabId === jiraTab.id && changeInfo.status === 'complete') {
+                chrome.tabs.onUpdated.removeListener(checkTab);
+                clearTimeout(timeout);
+                resolve();
+              }
+            };
+            
+            chrome.tabs.onUpdated.addListener(checkTab);
+            
+            // Controlla se è già caricata
+            chrome.tabs.get(jiraTab.id, (tab) => {
+              if (tab.status === 'complete' && tab.url && (tab.url.includes(panelUrl) || tab.url.includes(`/browse/${issueKey}`))) {
+                chrome.tabs.onUpdated.removeListener(checkTab);
+                clearTimeout(timeout);
+                resolve();
+              }
+            });
+          });
+          
+          if (progressBar) {
+            progressBar.update('Pannello caricato, attendo checklist...', 40);
+            progressBar.log('Pannello checklist caricato, attendo che meta tag prefetchedItems appaia nel DOM');
+          }
+        } else if (currentUrl.includes(`/browse/${issueKey}`)) {
+          // Se siamo sulla pagina issue Jira, naviga al pannello
+          if (progressBar) {
+            progressBar.update('Navigazione al pannello checklist...', 35);
+            progressBar.log(`Navigo dalla pagina issue al pannello checklist`);
+          }
+          
+          await chrome.tabs.update(jiraTab.id, { url: panelUrl });
+          
+          await new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => {
+              reject(new Error('Timeout navigazione pannello checklist (240s)'));
+            }, 240000);
+            
+            const checkTab = (tabId, changeInfo) => {
+              if (tabId === jiraTab.id && changeInfo.status === 'complete') {
+                chrome.tabs.onUpdated.removeListener(checkTab);
+                clearTimeout(timeout);
+                resolve();
+              }
+            };
+            
+            chrome.tabs.onUpdated.addListener(checkTab);
+            
+            chrome.tabs.get(jiraTab.id, (tab) => {
+              if (tab.status === 'complete' && tab.url && tab.url.includes(panelUrl)) {
+                chrome.tabs.onUpdated.removeListener(checkTab);
+                clearTimeout(timeout);
+                resolve();
+              }
+            });
+          });
+          
+          if (progressBar) {
+            progressBar.update('Pannello caricato, attendo checklist...', 40);
+            progressBar.log('Pannello checklist caricato, attendo che meta tag prefetchedItems appaia nel DOM');
+          }
+        } else {
+          if (progressBar) {
+            progressBar.update('Pannello già aperto, attendo checklist...', 40);
+            progressBar.log('Siamo già sul pannello checklist corretto');
+          }
+        }
+        
+        // PROVA 1: Leggi il meta tag direttamente dal DOM (metodo preferito)
+        if (progressBar) {
+          progressBar.update('Attendo che meta tag prefetchedItems appaia...', 45);
+          progressBar.log('Aspetto che il meta tag prefetchedItems appaia nel DOM della pagina');
+        }
+        
+        let metaResult = null;
+        try {
+          const messageResult = await Promise.race([
+            chrome.tabs.sendMessage(jiraTab.id, {
+              action: 'readChecklistFromMeta'
+            }),
+            new Promise((_, reject) => 
+              setTimeout(() => reject(new Error('Timeout attesa meta tag (240s)')), 240000)
+            )
+          ]);
+          
+          if (messageResult && messageResult.success && messageResult.items) {
+            metaResult = messageResult.items;
+            if (progressBar) {
+              progressBar.update('Meta tag trovato, parsing dati...', 80);
+              progressBar.log(`Meta tag prefetchedItems trovato nel DOM`, 'success');
+            }
+          } else if (messageResult && messageResult.error) {
+            throw new Error(messageResult.error);
+          }
+        } catch (metaError) {
+          if (progressBar) {
+            progressBar.log(`Errore lettura meta tag: ${metaError.message}`, 'warning');
+            progressBar.log('Provo metodo alternativo (fetch)...', 'warning');
+          }
+        }
+        
+        // Se il meta tag è stato letto con successo, usa quello
+        if (metaResult && Array.isArray(metaResult)) {
+          if (progressBar) {
+            progressBar.update('Normalizzazione elementi checklist...', 90);
+            progressBar.log(`Trovati ${metaResult.length} elementi nella checklist`);
+          }
+          
+          // Normalizza gli elementi
+          const normalizedItems = metaResult.map((item, index) => {
+            let state = 'OPEN';
+            if (item.state) {
+              state = item.state;
+            } else if (item.status) {
+              state = item.status;
+            } else if (item.checked !== undefined) {
+              state = item.checked ? 'DONE' : 'OPEN';
+            } else if (item.complete !== undefined) {
+              state = item.complete ? 'DONE' : 'OPEN';
+            }
+            
+            const name = item.summary || item.name || item.text || item.title || item.label || String(item) || `Item ${index + 1}`;
+            
+            let key = item.key || item.issueKey || item.issue || null;
+            if (!key && name) {
+              const keyMatch = name.match(/([A-Z]+-\d+)/);
+              if (keyMatch) {
+                key = keyMatch[1];
+              }
+            }
+            
+            return {
+              index: index + 1,
+              state: String(state).toUpperCase(),
+              name: String(name),
+              key: key,
+              raw: item
+            };
+          });
+          
+          debugInfo.itemsFound = normalizedItems.length;
+          debugInfo.method = 'meta-tag-dom';
+          
+          if (progressBar) {
+            progressBar.update('Checklist recuperata con successo!', 100);
+            progressBar.log(`Checklist recuperata: ${normalizedItems.length} elementi`, 'success');
+          }
+          
+          // Chiudi la tab se l'abbiamo creata noi
+          if (createdTabId) {
+            try {
+              await chrome.tabs.remove(createdTabId);
+              if (progressBar) {
+                progressBar.log('Tab Jira temporanea chiusa');
+              }
+            } catch (e) {
+              console.warn('Errore chiusura tab:', e);
+            }
+          }
+          
+          return { items: normalizedItems, debugInfo };
+        }
+        
+        // PROVA 2: Fallback - usa fetch (metodo vecchio)
+        if (progressBar) {
+          progressBar.update('Metodo alternativo: richiesta fetch...', 50);
+          progressBar.log('Lettura meta tag fallita, provo con fetch a herokuapp.com');
+        }
+        
+        let pageResult = null;
+        const maxRetries = 3;
+        let lastError = null;
+        
+        for (let retry = 0; retry < maxRetries; retry++) {
+          try {
+            if (progressBar && retry > 0) {
+              progressBar.log(`Tentativo fetch ${retry + 1}/${maxRetries}...`, 'warning');
+            }
+            
+            const messageResult = await Promise.race([
+              chrome.tabs.sendMessage(jiraTab.id, {
+                action: 'fetchChecklist',
+                url: url
+              }),
+              new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('Timeout richiesta (240s)')), 240000)
+              )
+            ]);
+            
+            if (messageResult && messageResult.success && messageResult.html) {
+              pageResult = messageResult;
+              if (progressBar && retry > 0) {
+                progressBar.log(`Richiesta fetch riuscita al tentativo ${retry + 1}`, 'success');
+              }
+              break;
+            } else if (messageResult && messageResult.error) {
+              lastError = new Error(messageResult.error);
+              if (retry < maxRetries - 1) {
+                const waitTime = 3000 * (retry + 1);
+                if (progressBar) {
+                  progressBar.log(`Errore: ${messageResult.error}. Riprovo tra ${waitTime/1000}s...`, 'warning');
+                }
+                await new Promise(resolve => setTimeout(resolve, waitTime));
+              }
+            }
+          } catch (messageError) {
+            lastError = messageError;
+            if (retry < maxRetries - 1) {
+              const waitTime = Math.min(3000 * (retry + 1), 15000);
+              if (progressBar) {
+                progressBar.log(`Errore: ${messageError.message}. Riprovo tra ${waitTime/1000}s...`, 'warning');
+              }
+              await new Promise(resolve => setTimeout(resolve, waitTime));
+            }
+          }
+        }
+        
+        if (pageResult && pageResult.html) {
+          if (progressBar) {
+            progressBar.update('Estraggo dati dalla risposta HTML...', 70);
+            progressBar.log('Risposta HTML ricevuta, cerco meta tag prefetchedItems');
+          }
+          
+          // Cerca il meta tag prefetchedItems nell'HTML
+          const metaMatch = pageResult.html.match(/<meta\s+name=["']prefetchedItems["']\s+content=["']([^"']+)["']/i);
+          if (!metaMatch) {
+            debugInfo.error = 'Meta tag prefetchedItems non trovato nella risposta HTML';
+            if (progressBar) {
+              progressBar.log('Meta tag prefetchedItems non trovato nell\'HTML', 'error');
+            }
+            // Chiudi la tab se l'abbiamo creata noi
+            if (createdTabId) {
+              try {
+                await chrome.tabs.remove(createdTabId);
+              } catch (e) {
+                console.warn('Errore chiusura tab:', e);
+              }
+            }
+            return { items: null, debugInfo };
+          }
+          
+          if (progressBar) {
+            progressBar.update('Decodifico dati JSON...', 80);
+            progressBar.log('Meta tag trovato nell\'HTML, decodifico entità HTML');
+          }
+          
+          // Decodifica le entità HTML (es: &quot; -> ")
+          let jsonStr = metaMatch[1];
+          const textarea = document.createElement('textarea');
+          textarea.innerHTML = jsonStr;
+          jsonStr = textarea.value;
+          
+          if (progressBar) {
+            progressBar.update('Parsing dati checklist...', 85);
+            progressBar.log('Parsing JSON dei dati della checklist');
+          }
+          
+          // Parsa il JSON
+          let prefetchedItems;
+          try {
+            prefetchedItems = JSON.parse(jsonStr);
+          } catch (e) {
+            debugInfo.error = `Errore nel parsing JSON: ${e.message}`;
+            if (progressBar) {
+              progressBar.log(`Errore parsing JSON: ${e.message}`, 'error');
+            }
+            // Chiudi la tab se l'abbiamo creata noi
+            if (createdTabId) {
+              try {
+                await chrome.tabs.remove(createdTabId);
+              } catch (e) {
+                console.warn('Errore chiusura tab:', e);
+              }
+            }
+            return { items: null, debugInfo };
+          }
+          
+          if (!Array.isArray(prefetchedItems)) {
+            debugInfo.error = 'prefetchedItems non è un array';
+            if (progressBar) {
+              progressBar.log('prefetchedItems non è un array', 'error');
+            }
+            // Chiudi la tab se l'abbiamo creata noi
+            if (createdTabId) {
+              try {
+                await chrome.tabs.remove(createdTabId);
+              } catch (e) {
+                console.warn('Errore chiusura tab:', e);
+              }
+            }
+            return { items: null, debugInfo };
+          }
+          
+          if (progressBar) {
+            progressBar.update('Normalizzazione elementi checklist...', 90);
+            progressBar.log(`Trovati ${prefetchedItems.length} elementi nella checklist`);
+          }
+          
+          // Normalizza gli elementi
+          const normalizedItems = prefetchedItems.map((item, index) => {
+            let state = 'OPEN';
+            if (item.state) {
+              state = item.state;
+            } else if (item.status) {
+              state = item.status;
+            } else if (item.checked !== undefined) {
+              state = item.checked ? 'DONE' : 'OPEN';
+            } else if (item.complete !== undefined) {
+              state = item.complete ? 'DONE' : 'OPEN';
+            }
+            
+            const name = item.summary || item.name || item.text || item.title || item.label || String(item) || `Item ${index + 1}`;
+            
+            let key = item.key || item.issueKey || item.issue || null;
+            if (!key && name) {
+              const keyMatch = name.match(/([A-Z]+-\d+)/);
+              if (keyMatch) {
+                key = keyMatch[1];
+              }
+            }
+            
+            return {
+              index: index + 1,
+              state: String(state).toUpperCase(),
+              name: String(name),
+              key: key,
+              raw: item
+            };
+          });
+          
+          debugInfo.itemsFound = normalizedItems.length;
+          debugInfo.method = 'fetch-html';
+          
+          if (progressBar) {
+            progressBar.update('Checklist recuperata con successo!', 100);
+            progressBar.log(`Checklist recuperata: ${normalizedItems.length} elementi`, 'success');
+          }
+          
+          // Chiudi la tab se l'abbiamo creata noi
+          if (createdTabId) {
+            try {
+              await chrome.tabs.remove(createdTabId);
+              if (progressBar) {
+                progressBar.log('Tab Jira temporanea chiusa');
+              }
+            } catch (e) {
+              console.warn('Errore chiusura tab:', e);
+            }
+          }
+          
+          return { items: normalizedItems, debugInfo };
+        }
+        
+        // Se siamo arrivati qui, entrambi i metodi hanno fallito
+        debugInfo.error = lastError ? lastError.message : 'Impossibile recuperare checklist';
+        if (progressBar) {
+          progressBar.log('Tutti i metodi falliti', 'error');
+        }
+        
+        // Chiudi la tab se l'abbiamo creata noi
+        if (createdTabId) {
+          try {
+            await chrome.tabs.remove(createdTabId);
+          } catch (e) {
+            console.warn('Errore chiusura tab:', e);
+          }
+        }
+      }
+    } catch (injectError) {
+      // Se l'iniezione fallisce, continua con la richiesta diretta
+      debugInfo.error = `Iniezione script fallita: ${injectError.message}. Provo richiesta diretta...`;
+      if (progressBar) {
+        progressBar.log(`Iniezione script fallita: ${injectError.message}`, 'warning');
+        progressBar.log('Tento richiesta diretta come fallback...');
+      }
+      
+      // Chiudi la tab se l'abbiamo creata noi
+      if (createdTabId) {
+        try {
+          await chrome.tabs.remove(createdTabId);
+        } catch (e) {
+          console.warn('Errore chiusura tab:', e);
+        }
+      }
+    }
+    
+    // PROVA 2: Richiesta diretta (fallback)
+    let res;
+    try {
+      res = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+        },
+        credentials: 'include',
+        mode: 'cors'
+      });
+    } catch (corsError) {
+      // Se fallisce con CORS, prova con 'omit'
+      try {
+        res = await fetch(url, {
+          method: 'GET',
+          headers: {
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+          },
+          credentials: 'omit',
+          mode: 'cors'
+        });
+      } catch (error2) {
+        debugInfo.error = `Errore CORS: ${error2.message || String(error2)}. La richiesta potrebbe essere bloccata dalle policy CORS del browser. Nota: assicurati che il permesso per herokuapp.com sia stato aggiunto al manifest.json e che l'estensione sia stata ricaricata.`;
+        return { items: null, debugInfo };
+      }
+    }
+    
+    debugInfo.status = res.status;
+    
+    if (!res.ok) {
+      debugInfo.error = `HTTP ${res.status}: ${res.statusText}`;
+      return { items: null, debugInfo };
+    }
+    
+    const html = await res.text();
+    
+    // Cerca il meta tag prefetchedItems
+    const metaMatch = html.match(/<meta\s+name=["']prefetchedItems["']\s+content=["']([^"']+)["']/i);
+    if (!metaMatch) {
+      debugInfo.error = 'Meta tag prefetchedItems non trovato nella risposta HTML';
+      return { items: null, debugInfo };
+    }
+    
+    // Decodifica le entità HTML (es: &quot; -> ")
+    let jsonStr = metaMatch[1];
+    const textarea = document.createElement('textarea');
+    textarea.innerHTML = jsonStr;
+    jsonStr = textarea.value;
+    
+    // Parsa il JSON
+    let prefetchedItems;
+    try {
+      prefetchedItems = JSON.parse(jsonStr);
+    } catch (e) {
+      debugInfo.error = `Errore nel parsing JSON: ${e.message}`;
+      return { items: null, debugInfo };
+    }
+    
+    if (!Array.isArray(prefetchedItems)) {
+      debugInfo.error = 'prefetchedItems non è un array';
+      return { items: null, debugInfo };
+    }
+    
+    // Normalizza gli elementi
+    const normalizedItems = prefetchedItems.map((item, index) => {
+      // Estrai i campi dall'oggetto item
+      // Formato atteso: { summary: "Hugo - Bug Return To Do - FGC-3764 - ...", state: "...", ... }
+      let state = 'OPEN';
+      if (item.state) {
+        state = item.state;
+      } else if (item.status) {
+        state = item.status;
+      } else if (item.checked !== undefined) {
+        state = item.checked ? 'DONE' : 'OPEN';
+      } else if (item.complete !== undefined) {
+        state = item.complete ? 'DONE' : 'OPEN';
+      }
+      
+      // Estrai il nome/descrizione
+      const name = item.summary || item.name || item.text || item.title || item.label || String(item) || `Item ${index + 1}`;
+      
+      // Estrai la chiave Jira se presente nel summary (es: "FGC-3764")
+      let key = item.key || item.issueKey || item.issue || null;
+      if (!key && name) {
+        const keyMatch = name.match(/([A-Z]+-\d+)/);
+        if (keyMatch) {
+          key = keyMatch[1];
+        }
+      }
+      
+      return {
+        index: index + 1,
+        state: String(state).toUpperCase(),
+        name: String(name),
+        key: key,
+        raw: item
+      };
+    });
+    
+    debugInfo.itemsFound = normalizedItems.length;
+    return { items: normalizedItems, debugInfo };
+    
+  } catch (error) {
+    debugInfo.error = error.message || String(error);
+    return { items: null, debugInfo };
+  }
+}
+
+/**
+ * Estrae gli elementi della Checklist da un'issue Jira
+ * @param {string} token - Token di autenticazione
+ * @param {string} issueKey - Chiave dell'issue (es: "FGC-10112")
+ * @param {Object} progressBar - Oggetto progress bar opzionale per aggiornamenti di stato
+ * @returns {Object} - {items: Array|null, debugInfo: Object}
+ */
+async function fetchChecklistItems(token, issueKey, progressBar = null) {
+  const debugInfo = {
+    allFields: [],
+    checklistFieldId: null,
+    checklistFieldName: null,
+    checklistValue: null,
+    checklistValueType: null,
+    itemsFound: 0,
+    error: null,
+    issueProperties: null,
+    checklistProperties: null,
+    herokuappDebug: null
+  };
+  
+  try {
+    // PROVA 0: Cerca nell'endpoint herokuapp.com (app Checklistr2)
+    if (progressBar) {
+      progressBar.update('Tentativo recupero da herokuapp.com...', 5);
+      progressBar.log('Avvio recupero checklist da app Checklistr2');
+    }
+    const herokuappResult = await fetchChecklistFromHerokuapp(issueKey, progressBar);
+    debugInfo.herokuappDebug = herokuappResult.debugInfo;
+    if (herokuappResult.items && herokuappResult.items.length > 0) {
+      debugInfo.itemsFound = herokuappResult.items.length;
+      debugInfo.error = null;
+      return { items: herokuappResult.items, debugInfo };
+    }
+    if (progressBar) {
+      progressBar.log('Recupero da herokuapp.com non riuscito, provo metodi alternativi...', 'warning');
+    }
+    
+    // PROVA 1: Cerca nelle proprietà dell'issue (priorità per app di terze parti)
+    debugInfo.issueProperties = await fetchIssueProperties(token, issueKey);
+    if (debugInfo.issueProperties && Object.keys(debugInfo.issueProperties).length > 0) {
+      // Prova a estrarre items dalle proprietà
+      for (const [key, value] of Object.entries(debugInfo.issueProperties)) {
+        debugInfo.checklistProperties = { key, value };
+        
+        // Prova a parsare il valore come array di items
+        let items = [];
+        
+        // Caso 1: Array diretto
+        if (Array.isArray(value)) {
+          items = value;
+        }
+        // Caso 2: Oggetto con proprietà che contiene array
+        else if (value && typeof value === 'object') {
+          if (value.items && Array.isArray(value.items)) {
+            items = value.items;
+          } else if (value.checklist && Array.isArray(value.checklist)) {
+            items = value.checklist;
+          } else if (value.data && Array.isArray(value.data)) {
+            items = value.data;
+          } else if (value.value && Array.isArray(value.value)) {
+            items = value.value;
+          } else {
+            // Cerca qualsiasi proprietà che sia un array
+            for (const propKey in value) {
+              if (Array.isArray(value[propKey])) {
+                items = value[propKey];
+                break;
+              }
+            }
+          }
+        }
+        // Caso 3: Stringa JSON
+        else if (typeof value === 'string') {
+          try {
+            const parsed = JSON.parse(value);
+            if (Array.isArray(parsed)) {
+              items = parsed;
+            } else if (parsed && typeof parsed === 'object') {
+              if (parsed.items && Array.isArray(parsed.items)) {
+                items = parsed.items;
+              } else if (parsed.checklist && Array.isArray(parsed.checklist)) {
+                items = parsed.checklist;
+              } else if (parsed.data && Array.isArray(parsed.data)) {
+                items = parsed.data;
+              }
+            }
+          } catch (e) {
+            // Non è JSON, prova a parsare come testo
+            items = parseChecklistText(value);
+          }
+        }
+        
+        if (items.length > 0) {
+          debugInfo.itemsFound = items.length;
+          debugInfo.error = null;
+          
+          // Normalizza gli elementi della checklist
+          const normalizedItems = items.map((item, index) => {
+            let state = 'OPEN';
+            if (item.state) state = item.state;
+            else if (item.status) state = item.status;
+            else if (item.checked !== undefined) state = item.checked ? 'DONE' : 'OPEN';
+            else if (item.complete !== undefined) state = item.complete ? 'DONE' : 'OPEN';
+            
+            // Se l'item è già stato parsato da parseChecklistText, usa quei campi
+            let name, key;
+            if (item.fullText) {
+              name = item.description || item.name || item.fullText;
+              key = item.key;
+              if (item.status) {
+                const statusLower = item.status.toLowerCase();
+                if (statusLower.includes('done') || statusLower.includes('complete') || statusLower.includes('closed')) {
+                  state = 'DONE';
+                } else {
+                  state = 'OPEN';
+                }
+              }
+            } else {
+              name = item.name || item.text || item.title || item.label || item.content || String(item) || `Item ${index + 1}`;
+              key = item.key || item.issueKey || item.issue || null;
+            }
+            
+            return {
+              index: index + 1,
+              state: String(state).toUpperCase(),
+              name: String(name),
+              key: key,
+              raw: item
+            };
+          });
+          
+          return { items: normalizedItems, debugInfo };
+        }
+      }
+    }
+    
+    // PROVA 2: Cerca nei campi personalizzati (fallback)
+    const raw = await jiraGetIssueRaw(token, issueKey);
+    
+    // Raccogli informazioni su tutti i campi
+    const names = raw.names || {};
+    const searchTerms = ['Hugo', 'FGC-3764', 'Notify label', 'Assigned to on the Modal'];
+    
+    Object.entries(names).forEach(([fieldId, fieldName]) => {
+      const fieldValue = raw.fields?.[fieldId];
+      const renderedValue = raw.renderedFields?.[fieldId];
+      const valueType = typeof fieldValue;
+      
+      // Estrai testo dal valore (supporta ADF, HTML, stringhe)
+      let textValue = '';
+      if (renderedValue && typeof renderedValue === 'string') {
+        // HTML renderizzato
+        const div = document.createElement('div');
+        div.innerHTML = renderedValue;
+        textValue = div.textContent || '';
+      } else if (fieldValue) {
+        if (typeof fieldValue === 'string') {
+          textValue = fieldValue;
+        } else if (typeof fieldValue === 'object') {
+          // Prova a estrarre testo da ADF o oggetti
+          try {
+            textValue = extractADFText(fieldValue) || JSON.stringify(fieldValue);
+          } catch {
+            textValue = String(fieldValue);
+          }
+        }
+      }
+      
+      const valuePreview = valueType === 'object' 
+        ? (Array.isArray(fieldValue) ? `Array[${fieldValue.length}]` : 'Object')
+        : String(fieldValue || '').substring(0, 100);
+      
+      // Cerca i termini di ricerca nel valore del campo
+      const matchesSearch = searchTerms.some(term => 
+        textValue.toLowerCase().includes(term.toLowerCase()) ||
+        valuePreview.toLowerCase().includes(term.toLowerCase())
+      );
+      
+      debugInfo.allFields.push({
+        id: fieldId,
+        name: fieldName,
+        type: valueType,
+        preview: valuePreview,
+        hasValue: fieldValue !== null && fieldValue !== undefined,
+        textValue: textValue.substring(0, 500), // Aggiungi il testo estratto
+        matchesSearch: matchesSearch // Flag se contiene i termini cercati
+      });
+    });
+    
+    // Cerca il campo checklist con varianti del nome
+    // Priorità: prima "Checklist Text", poi altri campi checklist (escludendo "Progress")
+    let checklistFieldId = null;
+    const checklistTextPatterns = [
+      /checklist\s+text/i,
+      /checklist\s+items/i
+    ];
+    const checklistPatterns = [
+      /checklist/i
+    ];
+    const excludePatterns = [
+      /progress/i,
+      /template/i
+    ];
+    
+    // Prima cerca "Checklist Text" specificamente
+    for (const [fieldId, fieldName] of Object.entries(names)) {
+      const nameStr = String(fieldName || '').toLowerCase();
+      if (checklistTextPatterns.some(pattern => pattern.test(nameStr)) && 
+          !excludePatterns.some(pattern => pattern.test(nameStr))) {
+        checklistFieldId = fieldId;
+        debugInfo.checklistFieldId = fieldId;
+        debugInfo.checklistFieldName = fieldName;
+        break;
+      }
+    }
+    
+    // Se non trovato, cerca altri campi checklist (escludendo Progress e Template)
+    if (!checklistFieldId) {
+      for (const [fieldId, fieldName] of Object.entries(names)) {
+        const nameStr = String(fieldName || '').toLowerCase();
+        if (checklistPatterns.some(pattern => pattern.test(nameStr)) && 
+            !excludePatterns.some(pattern => pattern.test(nameStr))) {
+          checklistFieldId = fieldId;
+          debugInfo.checklistFieldId = fieldId;
+          debugInfo.checklistFieldName = fieldName;
+          break;
+        }
+      }
+    }
+    
+    if (!checklistFieldId) {
+      debugInfo.error = 'Campo Checklist non trovato (esclusi Progress e Template)';
+      return { items: null, debugInfo };
+    }
+    
+    // Estrai il valore del campo checklist da fields E renderedFields
+    const checklistValue = raw.fields?.[checklistFieldId] || raw.renderedFields?.[checklistFieldId];
+    
+    // Se è ancora vuoto, verifica se il campo esiste ma è null/undefined
+    if (!checklistValue) {
+      // Controlla se il campo esiste nei renderedFields anche se vuoto
+      if (raw.renderedFields?.[checklistFieldId] !== undefined) {
+        debugInfo.checklistValue = raw.renderedFields[checklistFieldId];
+        debugInfo.checklistValueType = typeof raw.renderedFields[checklistFieldId];
+        debugInfo.error = 'Campo Checklist trovato ma vuoto (potrebbe essere un campo calcolato/view-only)';
+      } else if (raw.fields?.[checklistFieldId] !== undefined) {
+        debugInfo.checklistValue = raw.fields[checklistFieldId];
+        debugInfo.checklistValueType = typeof raw.fields[checklistFieldId];
+        debugInfo.error = 'Campo Checklist trovato ma vuoto';
+      } else {
+        debugInfo.error = 'Campo Checklist non trovato nei fields né nei renderedFields';
+      }
+      return { items: null, debugInfo };
+    }
+    
+    debugInfo.checklistValue = checklistValue;
+    debugInfo.checklistValueType = typeof checklistValue;
+    
+    // La checklist può essere in diversi formati
+    let items = [];
+    
+    // Caso 1: Array diretto
+    if (Array.isArray(checklistValue)) {
+      items = checklistValue;
+    }
+    // Caso 2: Oggetto ADF (Atlassian Document Format) - prova a estrarre testo
+    else if (checklistValue && typeof checklistValue === 'object' && checklistValue.type === 'doc') {
+      // Estrai testo da ADF
+      const adfText = extractADFText(checklistValue);
+      if (adfText) {
+        // Prova a parsare il testo come lista di elementi
+        items = parseChecklistText(adfText);
+      }
+    }
+    // Caso 3: Stringa JSON
+    else if (typeof checklistValue === 'string') {
+      try {
+        const parsed = JSON.parse(checklistValue);
+        if (Array.isArray(parsed)) {
+          items = parsed;
+        } else if (parsed && typeof parsed === 'object') {
+          if (parsed.items && Array.isArray(parsed.items)) {
+            items = parsed.items;
+          } else if (parsed.checklist && Array.isArray(parsed.checklist)) {
+            items = parsed.checklist;
+          } else if (parsed.value && Array.isArray(parsed.value)) {
+            items = parsed.value;
+          } else {
+            for (const key in parsed) {
+              if (Array.isArray(parsed[key])) {
+                items = parsed[key];
+                break;
+              }
+            }
+          }
+        }
+      } catch (e) {
+        // Non è JSON, prova a parsare come testo semplice
+        items = parseChecklistText(checklistValue);
+      }
+    }
+    // Caso 4: Oggetto
+    else if (checklistValue && typeof checklistValue === 'object') {
+      // Se è un oggetto ADF, estrai testo
+      if (checklistValue.type === 'doc') {
+        const adfText = extractADFText(checklistValue);
+        if (adfText) {
+          items = parseChecklistText(adfText);
+        }
+      } else if (checklistValue.items && Array.isArray(checklistValue.items)) {
+        items = checklistValue.items;
+      } else if (checklistValue.value && Array.isArray(checklistValue.value)) {
+        items = checklistValue.value;
+      } else if (checklistValue.checklist && Array.isArray(checklistValue.checklist)) {
+        items = checklistValue.checklist;
+      } else {
+        for (const key in checklistValue) {
+          if (Array.isArray(checklistValue[key])) {
+            items = checklistValue[key];
+            break;
+          }
+        }
+      }
+    }
+    
+    debugInfo.itemsFound = items.length;
+    
+    // Normalizza gli elementi della checklist
+    const normalizedItems = items.map((item, index) => {
+      let state = 'OPEN';
+      if (item.state) state = item.state;
+      else if (item.status) state = item.status;
+      else if (item.checked !== undefined) state = item.checked ? 'DONE' : 'OPEN';
+      else if (item.complete !== undefined) state = item.complete ? 'DONE' : 'OPEN';
+      
+      // Se l'item è già stato parsato da parseChecklistText, usa quei campi
+      let name, key;
+      if (item.fullText) {
+        // Item parsato da testo
+        name = item.description || item.name || item.fullText;
+        key = item.key;
+        // Prova a dedurre lo stato dal testo
+        if (item.status) {
+          const statusLower = item.status.toLowerCase();
+          if (statusLower.includes('done') || statusLower.includes('complete') || statusLower.includes('closed')) {
+            state = 'DONE';
+          } else {
+            state = 'OPEN';
+          }
+        }
+      } else {
+        // Item da oggetto/array
+        name = item.name || item.text || item.title || item.label || item.content || String(item) || `Item ${index + 1}`;
+        key = item.key || item.issueKey || item.issue || null;
+      }
+      
+      return {
+        index: index + 1,
+        state: String(state).toUpperCase(),
+        name: String(name),
+        key: key,
+        raw: item
+      };
+    });
+    
+    return { items: normalizedItems, debugInfo };
+    
+  } catch (error) {
+    debugInfo.error = error.message || String(error);
+    console.error('Errore nel recupero Checklist:', error);
+    return { items: null, debugInfo };
+  }
+}
+
+/**
+ * Mostra gli elementi della Checklist in un modale
+ * @param {string} issueKey - Chiave dell'issue
+ * @param {Array} items - Array di elementi checklist
+ * @param {Object} debugInfo - Informazioni di debug (opzionale)
+ */
+function showChecklistModal(issueKey, items, debugInfo = null) {
+  ensureContextUi();
+  
+  const modal = document.getElementById('ej-ai-modal');
+  const backdrop = document.getElementById('ej-ai-backdrop');
+  const titleEl = document.getElementById('ej-ai-modal-title');
+  const textEl = document.getElementById('ej-ai-modal-text');
+  
+  if (!modal || !titleEl || !textEl) {
+    setStatus('Errore: modale non disponibile', false);
+    return;
+  }
+  
+  // Costruisci il contenuto HTML
+  let html = `<h4 style="margin: 0 0 16px 0; color: #334155;">Checklist per ${issueKey}</h4>`;
+  
+  if (!items || items.length === 0) {
+      html += '<p style="color: #64748b; margin-bottom: 16px;">Nessun elemento nella checklist.</p>';
+    
+    // Mostra informazioni di debug se disponibili
+    if (debugInfo) {
+      html += '<div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; margin-bottom: 16px;">';
+      html += '<h5 style="margin: 0 0 12px 0; color: #334155; font-size: 14px; font-weight: 600;">Informazioni di Debug</h5>';
+      
+      // Mostra informazioni herokuapp se disponibili
+      if (debugInfo.herokuappDebug) {
+        html += '<div style="background: #fff; border: 1px solid #cbd5e1; border-radius: 6px; padding: 12px; margin-bottom: 12px;">';
+        html += '<p style="margin: 0 0 8px 0; color: #334155; font-size: 13px; font-weight: 600;">🔍 Tentativo herokuapp.com (Checklistr2)</p>';
+        if (debugInfo.herokuappDebug.url) {
+          html += `<p style="margin: 0 0 4px 0; color: #475569; font-size: 12px;"><strong>URL:</strong> <code style="background: #f1f5f9; padding: 2px 4px; border-radius: 3px; font-size: 11px;">${escapeHtml(debugInfo.herokuappDebug.url)}</code></p>`;
+        }
+        if (debugInfo.herokuappDebug.status) {
+          html += `<p style="margin: 0 0 4px 0; color: #475569; font-size: 12px;"><strong>Status HTTP:</strong> ${debugInfo.herokuappDebug.status}</p>`;
+        }
+        if (debugInfo.herokuappDebug.error) {
+          html += `<p style="margin: 0 0 4px 0; color: #dc2626; font-size: 12px;"><strong>Errore:</strong> ${escapeHtml(debugInfo.herokuappDebug.error)}</p>`;
+        } else if (debugInfo.herokuappDebug.itemsFound > 0) {
+          html += `<p style="margin: 0 0 4px 0; color: #10b981; font-size: 12px; font-weight: 600;">✓ Trovati ${debugInfo.herokuappDebug.itemsFound} elementi</p>`;
+        }
+        html += '</div>';
+      }
+      
+      if (debugInfo.error) {
+        html += `<p style="color: #dc2626; margin: 0 0 12px 0; font-size: 13px;"><strong>Errore:</strong> ${escapeHtml(debugInfo.error)}</p>`;
+      }
+      
+      // Mostra informazioni sulle proprietà se disponibili
+      if (debugInfo.issueProperties && Object.keys(debugInfo.issueProperties).length > 0) {
+        html += '<p style="margin: 0 0 8px 0; color: #10b981; font-size: 13px; font-weight: 600;">✓ Proprietà issue trovate:</p>';
+        Object.entries(debugInfo.issueProperties).forEach(([key, value]) => {
+          html += `<p style="margin: 0 0 4px 0; color: #475569; font-size: 12px;"><strong>Proprietà:</strong> ${escapeHtml(key)}</p>`;
+          const valueStr = typeof value === 'object' 
+            ? JSON.stringify(value, null, 2).substring(0, 300)
+            : String(value).substring(0, 300);
+          html += `<pre style="background: #fff; padding: 6px; border-radius: 4px; font-size: 10px; overflow-x: auto; max-height: 150px; overflow-y: auto; margin-bottom: 8px;">${escapeHtml(valueStr)}</pre>`;
+        });
+      } else {
+        html += '<p style="margin: 0 0 8px 0; color: #64748b; font-size: 13px;">Nessuna proprietà issue trovata.</p>';
+      }
+      
+      if (debugInfo.checklistFieldId) {
+        html += `<p style="margin: 8px 0 8px 0; color: #475569; font-size: 13px;"><strong>Campo trovato:</strong> "${escapeHtml(debugInfo.checklistFieldName)}" (ID: ${debugInfo.checklistFieldId})</p>`;
+        html += `<p style="margin: 0 0 8px 0; color: #475569; font-size: 13px;"><strong>Tipo valore:</strong> ${escapeHtml(debugInfo.checklistValueType || 'N/A')}</p>`;
+        if (debugInfo.checklistValue !== null && debugInfo.checklistValue !== undefined) {
+          const valueStr = typeof debugInfo.checklistValue === 'object' 
+            ? JSON.stringify(debugInfo.checklistValue, null, 2).substring(0, 500)
+            : String(debugInfo.checklistValue).substring(0, 500);
+          html += `<p style="margin: 0 0 8px 0; color: #475569; font-size: 13px;"><strong>Valore (anteprima):</strong></p>`;
+          html += `<pre style="background: #fff; padding: 8px; border-radius: 4px; font-size: 11px; overflow-x: auto; max-height: 200px; overflow-y: auto;">${escapeHtml(valueStr)}</pre>`;
+        }
+      } else {
+        html += '<p style="margin: 8px 0 12px 0; color: #475569; font-size: 13px;"><strong>Campo Checklist non trovato nei campi personalizzati.</strong></p>';
+      }
+      
+      html += '<details style="margin-top: 12px;">';
+      html += '<summary style="cursor: pointer; color: #2563eb; font-size: 13px; font-weight: 600; margin-bottom: 8px;">Mostra tutti i campi disponibili</summary>';
+      html += '<div style="max-height: 300px; overflow-y: auto;">';
+      html += '<table style="width: 100%; border-collapse: collapse; font-size: 12px;">';
+      html += '<thead><tr style="background: #f1f5f9;">';
+      html += '<th style="padding: 6px; text-align: left; font-weight: 600; color: #475569;">Nome Campo</th>';
+      html += '<th style="padding: 6px; text-align: left; font-weight: 600; color: #475569;">ID</th>';
+      html += '<th style="padding: 6px; text-align: left; font-weight: 600; color: #475569;">Tipo</th>';
+      html += '<th style="padding: 6px; text-align: left; font-weight: 600; color: #475569;">Anteprima</th>';
+      html += '<th style="padding: 6px; text-align: left; font-weight: 600; color: #475569;">Testo Estratto</th>';
+      html += '</tr></thead><tbody>';
+      
+      // Ordina i campi: prima quelli che matchano la ricerca
+      const sortedFields = [...debugInfo.allFields].sort((a, b) => {
+        if (a.matchesSearch && !b.matchesSearch) return -1;
+        if (!a.matchesSearch && b.matchesSearch) return 1;
+        return 0;
+      });
+      
+      sortedFields.forEach(field => {
+        let rowColor = 'transparent';
+        if (field.matchesSearch) {
+          rowColor = '#d1fae5'; // Verde chiaro per i match
+        } else if (field.name && /checklist/i.test(field.name)) {
+          rowColor = '#fef3c7'; // Giallo per checklist
+        }
+        
+        html += `<tr style="background: ${rowColor};">`;
+        html += `<td style="padding: 6px; color: #334155; font-weight: ${field.matchesSearch ? '600' : '400'};">${escapeHtml(field.name || 'N/A')}${field.matchesSearch ? ' ✓' : ''}</td>`;
+        html += `<td style="padding: 6px; color: #64748b; font-family: monospace; font-size: 11px;">${escapeHtml(field.id)}</td>`;
+        html += `<td style="padding: 6px; color: #64748b;">${escapeHtml(field.type)}</td>`;
+        html += `<td style="padding: 6px; color: #64748b; max-width: 200px; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(field.preview || '')}</td>`;
+        html += `<td style="padding: 6px; color: #64748b; max-width: 300px; overflow: hidden; text-overflow: ellipsis; font-size: 11px;">${escapeHtml(field.textValue || '')}</td>`;
+        html += '</tr>';
+      });
+      
+      html += '</tbody></table>';
+      html += '</div>';
+      html += '</details>';
+      html += '</div>';
+      
+      // Pulsante Copia
+      const debugText = JSON.stringify(debugInfo, null, 2);
+      html += `<button id="copy-debug-info" style="background: #2563eb; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; margin-top: 12px;">📋 Copia informazioni di debug</button>`;
+      html += `<div id="copy-feedback" style="display: none; color: #10b981; font-size: 12px; margin-top: 8px;">✓ Copiato negli appunti!</div>`;
+    }
+  } else {
+    // Mostra informazioni sulla fonte se disponibili
+    if (debugInfo && debugInfo.herokuappDebug && debugInfo.herokuappDebug.itemsFound > 0) {
+      html += `<p style="margin: 0 0 12px 0; color: #10b981; font-size: 13px; font-weight: 600;">✓ Dati recuperati da herokuapp.com (Checklistr2)</p>`;
+    }
+    html += `<p style="margin: 0 0 16px 0; color: #64748b; font-size: 13px;">Trovati ${items.length} elementi:</p>`;
+    html += '<div style="max-height: 60vh; overflow-y: auto;">';
+    html += '<table style="width: 100%; border-collapse: collapse; font-size: 13px;">';
+    html += '<thead><tr style="background: #f1f5f9; border-bottom: 2px solid #e2e8f0;">';
+    html += '<th style="padding: 8px; text-align: left; font-weight: 600; color: #475569;">#</th>';
+    html += '<th style="padding: 8px; text-align: left; font-weight: 600; color: #475569;">Stato</th>';
+    html += '<th style="padding: 8px; text-align: left; font-weight: 600; color: #475569;">Elemento</th>';
+    html += '<th style="padding: 8px; text-align: left; font-weight: 600; color: #475569;">Key</th>';
+    html += '</tr></thead><tbody>';
+    
+    items.forEach((item) => {
+      const stateColor = item.state === 'DONE' ? '#10b981' : '#f59e0b';
+      const stateBg = item.state === 'DONE' ? '#d1fae5' : '#fef3c7';
+      html += '<tr style="border-bottom: 1px solid #e2e8f0;">';
+      html += `<td style="padding: 8px; color: #64748b;">${item.index}</td>`;
+      html += `<td style="padding: 8px;"><span style="background: ${stateBg}; color: ${stateColor}; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; text-transform: uppercase;">${item.state}</span></td>`;
+      html += `<td style="padding: 8px; color: #334155;">${escapeHtml(item.name)}</td>`;
+      html += `<td style="padding: 8px; color: #64748b; font-family: monospace;">${item.key || '-'}</td>`;
+      html += '</tr>';
+    });
+    
+    html += '</tbody></table>';
+    html += '</div>';
+    
+    // Pulsante Copia anche quando ci sono items
+    if (debugInfo) {
+      const debugText = JSON.stringify(debugInfo, null, 2);
+      html += `<button id="copy-debug-info" style="background: #2563eb; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; margin-top: 16px;">📋 Copia informazioni di debug</button>`;
+      html += `<div id="copy-feedback" style="display: none; color: #10b981; font-size: 12px; margin-top: 8px;">✓ Copiato negli appunti!</div>`;
+    }
+  }
+  
+  // Mostra il modale
+  titleEl.textContent = `Checklist - ${issueKey}`;
+  textEl.innerHTML = html;
+  backdrop.style.display = 'block';
+  modal.style.display = 'block';
+  
+  // Event listener per il pulsante copia
+  const copyBtn = document.getElementById('copy-debug-info');
+  const copyFeedback = document.getElementById('copy-feedback');
+  if (copyBtn && debugInfo) {
+    copyBtn.addEventListener('click', async () => {
+      try {
+        const debugText = JSON.stringify(debugInfo, null, 2);
+        await navigator.clipboard.writeText(debugText);
+        if (copyFeedback) {
+          copyFeedback.style.display = 'block';
+          setTimeout(() => {
+            copyFeedback.style.display = 'none';
+          }, 2000);
+        }
+        setStatus('Informazioni di debug copiate negli appunti', true);
+      } catch (e) {
+        console.error('Errore copia:', e);
+        setStatus('Errore nella copia', false);
+      }
+    });
+  }
+}
+
+function populateEpicSelect(options = []) {
+  epicSelect.innerHTML = '';
+  options.forEach(optData => {
+    const opt = document.createElement('option');
+    opt.value = optData.value;
+    opt.textContent = optData.label;
+    epicSelect.appendChild(opt);
+  });
+  const noEpicOption = document.createElement('option');
+  noEpicOption.value = NO_EPIC_OPTION;
+  noEpicOption.textContent = 'No Epic Cards';
+  epicSelect.appendChild(noEpicOption);
+  
+  // Aggiungi opzione A specific Epic (prima di Minor Fixes)
+  const specificEpicOption = document.createElement('option');
+  specificEpicOption.value = SPECIFIC_EPIC_OPTION;
+  specificEpicOption.textContent = 'A specific Epic';
+  specificEpicOption.style.fontWeight = 'bold';
+  epicSelect.appendChild(specificEpicOption);
+  
+  // Aggiungi opzione Minor Fixes
+  const minorFixesOption = document.createElement('option');
+  minorFixesOption.value = MINOR_FIXES_OPTION;
+  minorFixesOption.textContent = 'Minor Fixes (still developing)';
+  epicSelect.appendChild(minorFixesOption);
+  
+  if (!options.length) {
+    epicSelect.value = NO_EPIC_OPTION;
+  }
+}
