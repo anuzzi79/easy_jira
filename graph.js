@@ -1199,9 +1199,9 @@ async function jiraCreateIssueLink(token, fromKey, toKey) {
   }
 }
 
-// GET /issue/{key}?expand=names,renderedFields  → restituisce TUTTI i campi disponibili
+// GET /issue/{key}?expand=names,renderedFields,changelog  → restituisce TUTTI i campi disponibili + changelog
 async function jiraGetIssueRaw(token, issueKey) {
-  const url = `${JIRA_BASE}/rest/api/3/issue/${encodeURIComponent(issueKey)}?expand=names,renderedFields`;
+  const url = `${JIRA_BASE}/rest/api/3/issue/${encodeURIComponent(issueKey)}?expand=names,renderedFields,changelog`;
   const res = await fetch(url, {
     method: 'GET',
       headers: {
@@ -1736,6 +1736,12 @@ async function loadGraph(epicKeyRaw) {
     hasBuildTypeFilters: typeof window.buildTypeFilters === 'function'
   });
   
+  // Pulizia cache changelog e reset Time Inertia
+  window.__EJ_CHANGELOG_CACHE__ = {};
+  timeInertiaActive = false;
+  timeInertiaHover = false;
+  timeInertiaBaseDate = null; // Verrà ricaricato dallo storage per l'epico corrente
+  
   try {
     setStatus('Caricamento credenziali…');
     let token;
@@ -1755,6 +1761,33 @@ async function loadGraph(epicKeyRaw) {
     if (!epicKey) throw new Error('Chiave epico non valida.');
     CURRENT_EPIC_KEY = epicKey;
     logBootStep('LOAD_GRAPH_EPIC_KEY_SET', { epicKey });
+    
+    // Carica data di ricalcolo Time Inertia dallo storage
+    const storageKey = `timeInertiaBaseDate_${epicKey}`;
+    try {
+      const result = await chrome.storage.sync.get(storageKey);
+      if (result[storageKey]) {
+        timeInertiaBaseDate = new Date(result[storageKey]);
+        // Aggiorna il testo
+        const day = String(timeInertiaBaseDate.getDate()).padStart(2, '0');
+        const month = String(timeInertiaBaseDate.getMonth() + 1).padStart(2, '0');
+        const year = timeInertiaBaseDate.getFullYear();
+        const recalcText = document.getElementById('ej-time-inertia-recalc-text');
+        if (recalcText) {
+          recalcText.textContent = `Dias re-calculados a partir do dia ${day}/${month}/${year}`;
+        }
+      } else {
+        timeInertiaBaseDate = null;
+        const recalcText = document.getElementById('ej-time-inertia-recalc-text');
+        if (recalcText) {
+          recalcText.textContent = '';
+        }
+      }
+    } catch (err) {
+      console.warn('Errore caricamento data Time Inertia:', err);
+      timeInertiaBaseDate = null;
+    }
+    
     activeStatusFilters = new Set(STATUS_SEQUENCE);
     syncStatusCheckboxStates();
     updateStatusSpecialCheckboxes();
@@ -2124,13 +2157,118 @@ function ensureContextUi() {
       .ej-node-menu button { width: 100%; padding: 6px 10px; border: none; background: transparent; color: inherit; text-align: left; border-radius: 6px; cursor: pointer; }
       .ej-node-menu button:hover { background: rgba(255,255,255,0.12); }
       .ej-inspect-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.35); z-index: 10002; display: none; }
-      .ej-inspect-modal { position: fixed; z-index: 10003; background: #fff; border-radius: 10px; box-shadow: 0 12px 40px rgba(0,0,0,0.25); width: min(620px, 90vw); max-height: 80vh; overflow: hidden; padding: 16px; top: 50%; left: 50%; transform: translate(-50%, -50%); font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; display: none; }
+      .ej-inspect-modal { position: fixed; z-index: 10003; background: #fff; border-radius: 10px; box-shadow: 0 12px 40px rgba(0,0,0,0.25); width: min(1200px, 95vw); max-height: 80vh; overflow: hidden; padding: 16px; top: 50%; left: 50%; transform: translate(-50%, -50%); font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; display: none; }
       .ej-inspect-modal h3 { margin: 0 0 10px 0; font-size: 18px; }
+      .ej-inspect-body-wrapper { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 12px; }
       .ej-inspect-body { overflow: auto; max-height: 56vh; border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; background: #f8fafc; font-size: 13px; white-space: pre-wrap; }
+      .ej-inspect-bump-section { display: none; overflow: auto; max-height: 56vh; border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; background: #f9fafb; font-size: 12px; white-space: pre-wrap; font-family: ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; }
+      .ej-inspect-bump-section.visible { display: block; }
+      .ej-inspect-bump-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+      .ej-inspect-bump-header h4 { margin: 0; font-size: 14px; color: #475569; }
       .ej-inspect-actions { margin-top: 12px; display: flex; gap: 8px; justify-content: flex-end; }
       .ej-btn { padding: 6px 12px; border-radius: 6px; border: 1px solid transparent; font-size: 14px; cursor: pointer; }
       .ej-btn-primary { background: #1d4ed8; color: #fff; }
       .ej-btn-secondary { background: #e5e7eb; color: #111827; }
+      .ej-time-inertia-btn { 
+        position: fixed; 
+        bottom: 20px; 
+        left: 260px; 
+        width: 60px; 
+        height: 60px; 
+        border-radius: 50%; 
+        border: none; 
+        cursor: pointer; 
+        font-size: 11px; 
+        font-weight: 600; 
+        color: white; 
+        text-align: center; 
+        line-height: 1.2; 
+        z-index: 10004; 
+        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
+        background-color: #3b82f6; /* Blu fisso quando non attivo */
+      }
+      .ej-time-inertia-btn:hover { 
+        transform: scale(1.1); 
+        box-shadow: 0 6px 16px rgba(0,0,0,0.4);
+      }
+      .ej-time-inertia-btn.active {
+        animation: timeInertiaPulse 2s ease-in-out infinite;
+      }
+      @keyframes timeInertiaPulse {
+        0%, 100% { background-color: #3b82f6; }
+        50% { background-color: #ef4444; }
+      }
+      .time-inertia-halo {
+        fill: none;
+        stroke-width: 3;
+        opacity: 0.6;
+        pointer-events: none;
+        transition: opacity 0.6s ease-out;
+      }
+      .ej-time-inertia-dots {
+        position: fixed;
+        bottom: 75px;
+        left: 260px;
+        width: 30px;
+        height: 20px;
+        cursor: pointer;
+        z-index: 10005;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 3px;
+        color: #64748b;
+        font-size: 16px;
+        font-weight: bold;
+        user-select: none;
+      }
+      .ej-time-inertia-dots:hover {
+        color: #3b82f6;
+      }
+      .ej-time-inertia-date-picker {
+        position: fixed;
+        bottom: 100px;
+        left: 260px;
+        background: white;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        padding: 12px;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.15);
+        z-index: 10006;
+        display: none;
+      }
+      .ej-time-inertia-date-picker.visible {
+        display: block;
+      }
+      .ej-time-inertia-date-picker input[type="date"] {
+        padding: 6px 10px;
+        border: 1px solid #cbd5e1;
+        border-radius: 4px;
+        font-size: 14px;
+      }
+      .ej-time-inertia-date-picker button {
+        margin-top: 8px;
+        padding: 6px 12px;
+        background: #3b82f6;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      .ej-time-inertia-date-picker button:hover {
+        background: #2563eb;
+      }
+      .ej-time-inertia-recalc-text {
+        position: fixed;
+        bottom: 20px;
+        left: 330px;
+        font-size: 11px;
+        color: #64748b;
+        z-index: 10004;
+        white-space: nowrap;
+      }
     `;
     document.head.appendChild(style);
   }
@@ -2190,9 +2328,19 @@ function ensureContextUi() {
     inspectModal.className = 'ej-inspect-modal';
     inspectModal.innerHTML = `
       <h3 id="ej-inspect-title">Inspect node</h3>
-      <div class="ej-inspect-body" id="ej-inspect-content">(caricamento…)</div>
+      <div class="ej-inspect-body-wrapper">
+        <div class="ej-inspect-body" id="ej-inspect-content">(caricamento…)</div>
+        <div class="ej-inspect-bump-section" id="ej-inspect-bump-section">
+          <div class="ej-inspect-bump-header">
+            <h4>Bump list extended</h4>
+            <button class="ej-btn ej-btn-secondary" id="ej-inspect-bump-copy" style="padding: 4px 8px; font-size: 12px;">Copia</button>
+          </div>
+          <div id="ej-inspect-bump-content">(clicca "Bump list extended" per caricare)</div>
+        </div>
+      </div>
       <div class="ej-inspect-actions">
         <button class="ej-btn ej-btn-secondary" id="ej-inspect-close">Chiudi</button>
+        <button class="ej-btn ej-btn-secondary" id="ej-inspect-bump-toggle">Bump list extended</button>
         <button class="ej-btn ej-btn-primary" id="ej-inspect-copy">Copia</button>
       </div>
     `;
@@ -2217,10 +2365,449 @@ function ensureContextUi() {
         setStatus('Impossibile copiare negli appunti.', false);
       }
     });
+    
+    // Event listener per Bump list extended
+    const bumpToggleBtn = document.getElementById('ej-inspect-bump-toggle');
+    const bumpContentEl = document.getElementById('ej-inspect-bump-content');
+    const bumpCopyBtn = document.getElementById('ej-inspect-bump-copy');
+    const bumpSection = document.getElementById('ej-inspect-bump-section');
+    
+    if (bumpToggleBtn && bumpSection && bumpContentEl && !bumpToggleBtn.dataset.listenerAdded) {
+      bumpToggleBtn.dataset.listenerAdded = '1';
+      bumpToggleBtn.addEventListener('click', () => {
+        logBootStep('BUMP_TOGGLE_CLICK', {
+          hasBumpSection: !!bumpSection,
+          hasBumpContentEl: !!bumpContentEl,
+          isVisible: bumpSection.classList.contains('visible')
+        });
+        
+        const rawDataStr = inspectModal.dataset.rawData;
+        logBootStep('BUMP_TOGGLE_CHECK_DATA', {
+          hasRawDataStr: !!rawDataStr,
+          rawDataStrLength: rawDataStr?.length || 0,
+          hasDataset: !!inspectModal.dataset.rawData
+        });
+        
+        if (!rawDataStr) {
+          logBootStep('BUMP_TOGGLE_NO_DATA', { error: 'Dati raw non disponibili' });
+          setStatus('Dati raw non disponibili', false);
+          return;
+        }
+        
+        if (bumpSection.classList.contains('visible')) {
+          // Nascondi
+          logBootStep('BUMP_TOGGLE_HIDE', {});
+          bumpSection.classList.remove('visible');
+          bumpToggleBtn.textContent = 'Bump list extended';
+        } else {
+          // Mostra e carica
+          logBootStep('BUMP_TOGGLE_SHOW_START', {});
+          try {
+            logBootStep('BUMP_TOGGLE_PARSE_START', { rawDataStrLength: rawDataStr.length });
+            const rawData = JSON.parse(rawDataStr);
+            logBootStep('BUMP_TOGGLE_PARSE_OK', { 
+              rawDataKeys: Object.keys(rawData).slice(0, 10),
+              rawDataSize: JSON.stringify(rawData).length
+            });
+            
+            const formatted = JSON.stringify(rawData, null, 2);
+            logBootStep('BUMP_TOGGLE_FORMAT_OK', { formattedLength: formatted.length });
+            
+            bumpContentEl.textContent = formatted;
+            logBootStep('BUMP_TOGGLE_CONTENT_SET', { 
+              contentLength: bumpContentEl.textContent?.length || 0,
+              hasContent: !!bumpContentEl.textContent
+            });
+            
+            bumpSection.classList.add('visible');
+            logBootStep('BUMP_TOGGLE_VISIBLE_SET', { 
+              hasVisibleClass: bumpSection.classList.contains('visible'),
+              bumpSectionDisplay: window.getComputedStyle(bumpSection).display
+            });
+            
+            bumpToggleBtn.textContent = 'Nascondi bump list';
+            setStatus('Bump list extended caricata', true);
+            logBootStep('BUMP_TOGGLE_SUCCESS', {});
+          } catch (err) {
+            logBootStep('BUMP_TOGGLE_ERROR', { 
+              error: err.message,
+              stack: err.stack,
+              rawDataStrPreview: rawDataStr?.substring(0, 200)
+            });
+            console.error('Errore parsing raw data', err);
+            setStatus('Errore nel caricamento dei dati', false);
+          }
+        }
+      });
+    } else {
+      logBootStep('BUMP_TOGGLE_ELEMENTS_MISSING', {
+        hasBumpToggleBtn: !!bumpToggleBtn,
+        hasBumpSection: !!bumpSection,
+        hasBumpContentEl: !!bumpContentEl
+      });
+    }
+    
+    if (bumpCopyBtn && bumpContentEl) {
+      bumpCopyBtn.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(bumpContentEl.textContent || '');
+          setStatus('Bump list copiata negli appunti.', true);
+        } catch (err) {
+          console.error('Clipboard error', err);
+          setStatus('Impossibile copiare negli appunti.', false);
+        }
+      });
+    }
   } else {
     inspectModal = document.getElementById('ej-inspect-modal');
     inspectContentEl = document.getElementById('ej-inspect-content');
     inspectCopyBtn = document.getElementById('ej-inspect-copy');
+    
+    const bumpToggleBtn = document.getElementById('ej-inspect-bump-toggle');
+    const bumpContentEl = document.getElementById('ej-inspect-bump-content');
+    const bumpCopyBtn = document.getElementById('ej-inspect-bump-copy');
+    const bumpSection = document.getElementById('ej-inspect-bump-section');
+    
+    // Aggiungi listener solo se non già aggiunti
+    if (bumpToggleBtn && !bumpToggleBtn.dataset.listenerAdded) {
+      bumpToggleBtn.dataset.listenerAdded = '1';
+      bumpToggleBtn.addEventListener('click', () => {
+        logBootStep('BUMP_TOGGLE_CLICK_EXISTING', {
+          hasBumpSection: !!bumpSection,
+          hasBumpContentEl: !!bumpContentEl,
+          isVisible: bumpSection?.classList.contains('visible')
+        });
+        
+        const rawDataStr = inspectModal.dataset.rawData;
+        logBootStep('BUMP_TOGGLE_CHECK_DATA_EXISTING', {
+          hasRawDataStr: !!rawDataStr,
+          rawDataStrLength: rawDataStr?.length || 0
+        });
+        
+        if (!rawDataStr) {
+          logBootStep('BUMP_TOGGLE_NO_DATA_EXISTING', { error: 'Dati raw non disponibili' });
+          setStatus('Dati raw non disponibili', false);
+          return;
+        }
+        if (bumpSection.classList.contains('visible')) {
+          logBootStep('BUMP_TOGGLE_HIDE_EXISTING', {});
+          bumpSection.classList.remove('visible');
+          bumpToggleBtn.textContent = 'Bump list extended';
+        } else {
+          logBootStep('BUMP_TOGGLE_SHOW_START_EXISTING', {});
+          try {
+            const rawData = JSON.parse(rawDataStr);
+            const formatted = JSON.stringify(rawData, null, 2);
+            bumpContentEl.textContent = formatted;
+            bumpSection.classList.add('visible');
+            logBootStep('BUMP_TOGGLE_SUCCESS_EXISTING', {
+              contentLength: bumpContentEl.textContent?.length || 0,
+              hasVisibleClass: bumpSection.classList.contains('visible')
+            });
+            bumpToggleBtn.textContent = 'Nascondi bump list';
+            setStatus('Bump list extended caricata', true);
+          } catch (err) {
+            logBootStep('BUMP_TOGGLE_ERROR_EXISTING', { 
+              error: err.message,
+              stack: err.stack
+            });
+            console.error('Errore parsing raw data', err);
+            setStatus('Errore nel caricamento dei dati', false);
+          }
+        }
+      });
+    }
+    
+    if (bumpCopyBtn && !bumpCopyBtn.dataset.listenerAdded) {
+      bumpCopyBtn.dataset.listenerAdded = '1';
+      bumpCopyBtn.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(bumpContentEl.textContent || '');
+          setStatus('Bump list copiata negli appunti.', true);
+        } catch (err) {
+          console.error('Clipboard error', err);
+          setStatus('Impossibile copiare negli appunti.', false);
+        }
+      });
+    }
+  }
+  
+  // Bottone Time Inertia
+  let timeInertiaBtn = document.getElementById('ej-time-inertia-btn');
+  if (!timeInertiaBtn) {
+    timeInertiaBtn = document.createElement('button');
+    timeInertiaBtn.id = 'ej-time-inertia-btn';
+    timeInertiaBtn.className = 'ej-time-inertia-btn';
+    timeInertiaBtn.innerHTML = 'Time<br>Inertia';
+    document.body.appendChild(timeInertiaBtn);
+  }
+  
+  // Event handlers per Time Inertia (solo se non già aggiunti)
+  if (timeInertiaBtn && !timeInertiaBtn.dataset.handlersAdded) {
+    timeInertiaBtn.dataset.handlersAdded = '1';
+    let fadeOutTimeout = null;
+    
+    // Funzione per attivare Time Inertia
+    async function activateTimeInertia() {
+      const nodeSelection = currentGraphState.nodeSelection;
+      if (!nodeSelection || !nodeSelection.size()) return;
+      
+      // Recupera token
+      let token;
+      try {
+        token = CURRENT_AUTH_TOKEN || (await getCreds()).token;
+      } catch {
+        setStatus('Errore: credenziali non disponibili per Time Inertia', false);
+        return;
+      }
+      
+      // Ottieni tutte le chiavi dei nodi (escludendo quelli con status esclusi)
+      const nodeKeys = [];
+      nodeSelection.each(d => {
+        if (!isExcludedStatus(d.status)) {
+          nodeKeys.push(d.key);
+        }
+      });
+      
+      if (nodeKeys.length === 0) {
+        setStatus('Nessun nodo valido per Time Inertia', false);
+        return;
+      }
+      
+      setStatus(`Recupero changelog per ${nodeKeys.length} nodi...`, true);
+      
+      // Recupera changelog
+      const changelogMap = await fetchChangelogsForNodes(token, nodeKeys);
+      
+      // Aggiorna gli aloni
+      updateTimeInertiaHalos(nodeSelection, changelogMap);
+      
+      setStatus(`Time Inertia attivato (${changelogMap.size} nodi)`, true);
+    }
+    
+    // mouseenter: attiva modalità
+    timeInertiaBtn.addEventListener('mouseenter', async () => {
+      timeInertiaHover = true;
+      
+      // Cancella eventuale fade-out in corso
+      if (fadeOutTimeout) {
+        clearTimeout(fadeOutTimeout);
+        fadeOutTimeout = null;
+      }
+      
+      // Se la modalità non è già attiva, attivala
+      if (!timeInertiaActive) {
+        await activateTimeInertia();
+      } else {
+        // Se già attiva, aggiorna gli aloni (potrebbero essere cambiati i nodi)
+        const nodeSelection = currentGraphState.nodeSelection;
+        if (nodeSelection && nodeSelection.size()) {
+          // Ricrea la map dai dati in cache
+          const changelogMap = new Map();
+          nodeSelection.each(d => {
+            if (window.__EJ_CHANGELOG_CACHE__[d.key]) {
+              changelogMap.set(d.key, window.__EJ_CHANGELOG_CACHE__[d.key]);
+            }
+          });
+          updateTimeInertiaHalos(nodeSelection, changelogMap);
+        }
+      }
+    });
+    
+    // mouseleave: se non è stato fatto click, avvia fade-out
+    timeInertiaBtn.addEventListener('mouseleave', () => {
+      timeInertiaHover = false;
+      
+      // Se la modalità non è persistente (click), avvia fade-out
+      if (!timeInertiaActive) {
+        const nodeSelection = currentGraphState.nodeSelection;
+        if (nodeSelection && nodeSelection.size()) {
+          // Avvia fade-out dopo un piccolo delay per evitare flickering
+          fadeOutTimeout = setTimeout(() => {
+            removeTimeInertiaHalos(nodeSelection);
+            fadeOutTimeout = null;
+          }, 100);
+        }
+      }
+    });
+    
+    // click: toggle modalità persistente
+    timeInertiaBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      
+      // Cancella eventuale fade-out
+      if (fadeOutTimeout) {
+        clearTimeout(fadeOutTimeout);
+        fadeOutTimeout = null;
+      }
+      
+      // Toggle modalità
+      timeInertiaActive = !timeInertiaActive;
+      
+      if (timeInertiaActive) {
+        // Attiva
+        await activateTimeInertia();
+        timeInertiaBtn.classList.add('active');
+      } else {
+        // Disattiva: rimuovi aloni
+        const nodeSelection = currentGraphState.nodeSelection;
+        if (nodeSelection && nodeSelection.size()) {
+          removeTimeInertiaHalos(nodeSelection);
+        }
+        timeInertiaBtn.classList.remove('active');
+        setStatus('Time Inertia disattivato', true);
+      }
+    });
+  }
+  
+  // Tre puntini per date picker
+  let timeInertiaDots = document.getElementById('ej-time-inertia-dots');
+  if (!timeInertiaDots) {
+    timeInertiaDots = document.createElement('div');
+    timeInertiaDots.id = 'ej-time-inertia-dots';
+    timeInertiaDots.className = 'ej-time-inertia-dots';
+    timeInertiaDots.innerHTML = '⋮';
+    document.body.appendChild(timeInertiaDots);
+  }
+  
+  // Date picker
+  let timeInertiaDatePicker = document.getElementById('ej-time-inertia-date-picker');
+  if (!timeInertiaDatePicker) {
+    timeInertiaDatePicker = document.createElement('div');
+    timeInertiaDatePicker.id = 'ej-time-inertia-date-picker';
+    timeInertiaDatePicker.className = 'ej-time-inertia-date-picker';
+    timeInertiaDatePicker.innerHTML = `
+      <label style="display: block; margin-bottom: 6px; font-size: 12px; color: #475569;">Data di ricalcolo:</label>
+      <input type="date" id="ej-time-inertia-date-input" style="width: 100%;">
+      <button id="ej-time-inertia-date-apply">Applica</button>
+      <button id="ej-time-inertia-date-clear" style="margin-left: 6px; background: #ef4444;">Rimuovi</button>
+    `;
+    document.body.appendChild(timeInertiaDatePicker);
+  }
+  
+  // Testo ricalcolo
+  let timeInertiaRecalcText = document.getElementById('ej-time-inertia-recalc-text');
+  if (!timeInertiaRecalcText) {
+    timeInertiaRecalcText = document.createElement('div');
+    timeInertiaRecalcText.id = 'ej-time-inertia-recalc-text';
+    timeInertiaRecalcText.className = 'ej-time-inertia-recalc-text';
+    document.body.appendChild(timeInertiaRecalcText);
+  }
+  
+  // Event handlers per i tre puntini
+  if (timeInertiaDots && !timeInertiaDots.dataset.handlersAdded) {
+    timeInertiaDots.dataset.handlersAdded = '1';
+    
+    timeInertiaDots.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const picker = document.getElementById('ej-time-inertia-date-picker');
+      if (picker) {
+        picker.classList.toggle('visible');
+      }
+    });
+    
+    // Chiudi picker quando si clicca fuori
+    document.addEventListener('click', (e) => {
+      const picker = document.getElementById('ej-time-inertia-date-picker');
+      const dots = document.getElementById('ej-time-inertia-dots');
+      if (picker && dots && !picker.contains(e.target) && !dots.contains(e.target)) {
+        picker.classList.remove('visible');
+      }
+    });
+  }
+  
+  // Event handlers per date picker
+  const dateInput = document.getElementById('ej-time-inertia-date-input');
+  const dateApplyBtn = document.getElementById('ej-time-inertia-date-apply');
+  const dateClearBtn = document.getElementById('ej-time-inertia-date-clear');
+  
+  if (dateApplyBtn && !dateApplyBtn.dataset.handlersAdded) {
+    dateApplyBtn.dataset.handlersAdded = '1';
+    
+    dateApplyBtn.addEventListener('click', async () => {
+      const dateValue = dateInput?.value;
+      if (!dateValue) return;
+      
+      const date = new Date(dateValue);
+      const storageKey = `timeInertiaBaseDate_${CURRENT_EPIC_KEY || 'NO_EPIC'}`;
+      
+      try {
+        await chrome.storage.sync.set({ [storageKey]: date.toISOString() });
+        
+        // Aggiorna il testo
+        const day = String(date.getDate()).padStart(2, '0');
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const year = date.getFullYear();
+        const recalcText = document.getElementById('ej-time-inertia-recalc-text');
+        if (recalcText) {
+          recalcText.textContent = `Dias re-calculados a partir do dia ${day}/${month}/${year}`;
+        }
+        
+        // Nascondi picker
+        const picker = document.getElementById('ej-time-inertia-date-picker');
+        if (picker) picker.classList.remove('visible');
+        
+        // Se Time Inertia è attivo, riaggiorna gli aloni
+        if (timeInertiaActive) {
+          const nodeSelection = currentGraphState.nodeSelection;
+          if (nodeSelection && nodeSelection.size()) {
+            const changelogMap = new Map();
+            nodeSelection.each(d => {
+              if (window.__EJ_CHANGELOG_CACHE__[d.key]) {
+                changelogMap.set(d.key, window.__EJ_CHANGELOG_CACHE__[d.key]);
+              }
+            });
+            updateTimeInertiaHalos(nodeSelection, changelogMap);
+          }
+        }
+        
+        setStatus('Data di ricalcolo salvata', true);
+      } catch (err) {
+        console.error('Errore salvataggio data:', err);
+        setStatus('Errore nel salvataggio della data', false);
+      }
+    });
+  }
+  
+  if (dateClearBtn && !dateClearBtn.dataset.handlersAdded) {
+    dateClearBtn.dataset.handlersAdded = '1';
+    
+    dateClearBtn.addEventListener('click', async () => {
+      const storageKey = `timeInertiaBaseDate_${CURRENT_EPIC_KEY || 'NO_EPIC'}`;
+      
+      try {
+        await chrome.storage.sync.remove(storageKey);
+        
+        // Rimuovi il testo
+        const recalcText = document.getElementById('ej-time-inertia-recalc-text');
+        if (recalcText) {
+          recalcText.textContent = '';
+        }
+        
+        // Nascondi picker
+        const picker = document.getElementById('ej-time-inertia-date-picker');
+        if (picker) picker.classList.remove('visible');
+        
+        // Se Time Inertia è attivo, riaggiorna gli aloni
+        if (timeInertiaActive) {
+          const nodeSelection = currentGraphState.nodeSelection;
+          if (nodeSelection && nodeSelection.size()) {
+            const changelogMap = new Map();
+            nodeSelection.each(d => {
+              if (window.__EJ_CHANGELOG_CACHE__[d.key]) {
+                changelogMap.set(d.key, window.__EJ_CHANGELOG_CACHE__[d.key]);
+              }
+            });
+            updateTimeInertiaHalos(nodeSelection, changelogMap);
+          }
+        }
+        
+        setStatus('Data di ricalcolo rimossa', true);
+      } catch (err) {
+        console.error('Errore rimozione data:', err);
+        setStatus('Errore nella rimozione della data', false);
+      }
+    });
   }
 }
 
@@ -2517,10 +3104,312 @@ function hideModal() {
 }
 // ===== fine UI =====
 
+// ===== Time Inertia: Cache e funzioni helper =====
+// Cache globale per i changelog delle issue
+window.__EJ_CHANGELOG_CACHE__ = window.__EJ_CHANGELOG_CACHE__ || {};
+
+// Variabili globali per lo stato Time Inertia
+let timeInertiaActive = false;
+let timeInertiaHover = false;
+let timeInertiaBaseDate = null; // Data di riferimento per il ricalcolo (null = usa "now")
+
+/**
+ * Verifica se uno status è escluso dalla funzionalità Time Inertia
+ * @param {string} status - Status da verificare
+ * @returns {boolean} - true se escluso (UAT, SKIP UAT, RELEASED, CANCELLED)
+ */
+function isExcludedStatus(status) {
+  if (!status) return false;
+  const normalized = String(status).toUpperCase().trim();
+  return normalized === 'UAT' || normalized === 'SKIP UAT' || normalized === 'RELEASED' || normalized === 'CANCELLED';
+}
+
+/**
+ * Estrae la data dell'ultimo cambio di status dal changelog
+ * @param {Object} raw - Dati raw dell'issue Jira (con changelog)
+ * @param {string} currentStatus - Status corrente della card
+ * @returns {Date|null} - Data dell'ultimo cambio di status, o null se non trovata
+ */
+function getLastStatusChangeDate(raw, currentStatus) {
+  if (!raw?.changelog?.histories || !currentStatus) return null;
+  
+  const histories = raw.changelog.histories;
+  // Cerca dall'ultima modifica alla prima (ordine cronologico inverso)
+  for (let i = histories.length - 1; i >= 0; i--) {
+    const history = histories[i];
+    if (!history.items || !Array.isArray(history.items)) continue;
+    
+    // Cerca qualsiasi cambio di status (non solo quello corrente)
+    for (const item of history.items) {
+      if (item.field === 'status') {
+        // Trovato un cambio di status
+        try {
+          return new Date(history.created);
+        } catch {
+          return null;
+        }
+      }
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * Calcola i giorni dall'ultimo cambio di status
+ * @param {Object} raw - Dati raw dell'issue Jira (con changelog)
+ * @param {string} currentStatus - Status corrente della card
+ * @param {Date|null} referenceDate - Data di riferimento opzionale (null = usa timeInertiaBaseDate o "now")
+ * @returns {number|null} - Numero di giorni, o null se non disponibile
+ */
+function calculateDaysFromLastStatusChange(raw, currentStatus, referenceDate = null) {
+  const changeDate = getLastStatusChangeDate(raw, currentStatus);
+  if (!changeDate) return null;
+  
+  // Usa referenceDate se fornito, altrimenti timeInertiaBaseDate se presente, altrimenti "now"
+  const refDate = referenceDate || timeInertiaBaseDate || new Date();
+  const diffMs = refDate - changeDate;
+  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+  return Math.max(0, diffDays); // Non negativo
+}
+
+/**
+ * Mappa i giorni a un colore per Time Inertia (verde → giallo → rosso)
+ * @param {number} days - Numero di giorni
+ * @returns {string} - Colore RGB (es. "rgb(34, 197, 94)")
+ */
+function getTimeInertiaColor(days) {
+  if (days === null || days === undefined) return 'rgba(128, 128, 128, 0.3)'; // Grigio se non disponibile
+  
+  // Scala lineare: verde (0) → giallo (5) → rosso (10+)
+  const green = { r: 34, g: 197, b: 94 };   // rgb(34, 197, 94)
+  const yellow = { r: 234, g: 179, b: 8 };   // rgb(234, 179, 8)
+  const red = { r: 220, g: 38, b: 38 };     // rgb(220, 38, 38)
+  
+  let r, g, b;
+  
+  if (days <= 0) {
+    // Verde puro
+    r = green.r;
+    g = green.g;
+    b = green.b;
+  } else if (days >= 10) {
+    // Rosso puro
+    r = red.r;
+    g = red.g;
+    b = red.b;
+  } else if (days <= 5) {
+    // Interpolazione verde → giallo (0-5 giorni)
+    const t = days / 5;
+    r = Math.round(green.r + (yellow.r - green.r) * t);
+    g = Math.round(green.g + (yellow.g - green.g) * t);
+    b = Math.round(green.b + (yellow.b - green.b) * t);
+  } else {
+    // Interpolazione giallo → rosso (5-10 giorni)
+    const t = (days - 5) / 5;
+    r = Math.round(yellow.r + (red.r - yellow.r) * t);
+    g = Math.round(yellow.g + (red.g - yellow.g) * t);
+    b = Math.round(yellow.b + (red.b - yellow.b) * t);
+  }
+  
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+/**
+ * Aggiorna gli aloni Time Inertia attorno ai nodi
+ * @param {d3.Selection} nodeSelection - Selezione D3 dei nodi
+ * @param {Map<string, Object>} changelogMap - Map con chiave issue key e valore raw data
+ */
+function updateTimeInertiaHalos(nodeSelection, changelogMap) {
+  if (!nodeSelection || !changelogMap) return;
+  
+  nodeSelection.each(function(d) {
+    const g = d3.select(this);
+    
+    // Salta i nodi con status esclusi
+    if (isExcludedStatus(d.status)) {
+      g.selectAll('circle.time-inertia-halo').remove();
+      return;
+    }
+    
+    // Ottieni il changelog per questo nodo
+    const raw = changelogMap.get(d.key);
+    if (!raw) {
+      g.selectAll('circle.time-inertia-halo').remove();
+      return;
+    }
+    
+    // Calcola i giorni dall'ultimo cambio di status
+    const days = calculateDaysFromLastStatusChange(raw, d.status);
+    const color = getTimeInertiaColor(days);
+    
+    // Determina il raggio dell'alone (più grande del nodo)
+    const baseRadius = d.id === CURRENT_EPIC_KEY ? 10 : 7;
+    const haloRadius = baseRadius * 2.5;
+    
+    // Aggiungi o aggiorna l'alone
+    const halo = g.selectAll('circle.time-inertia-halo')
+      .data([d])
+      .join(
+        enter => enter.append('circle')
+          .attr('class', 'time-inertia-halo')
+          .attr('r', haloRadius)
+          .attr('stroke', color)
+          .attr('opacity', 0)
+          .call(enter => enter.transition().duration(600).attr('opacity', 0.6)),
+        update => update
+          .attr('stroke', color)
+          .attr('r', haloRadius)
+          .attr('opacity', 0.6),
+        exit => exit.remove()
+      );
+    
+    // Posiziona l'alone dietro il nodo
+    halo.lower();
+  });
+}
+
+/**
+ * Rimuove gli aloni Time Inertia con fade-out
+ * @param {d3.Selection} nodeSelection - Selezione D3 dei nodi
+ */
+function removeTimeInertiaHalos(nodeSelection) {
+  if (!nodeSelection) return;
+  
+  nodeSelection.each(function() {
+    const g = d3.select(this);
+    const halos = g.selectAll('circle.time-inertia-halo');
+    
+    if (!halos.empty()) {
+      halos.transition()
+        .duration(600) // 0.6 secondi come richiesto
+        .attr('opacity', 0)
+        .on('end', function() {
+          d3.select(this).remove();
+        });
+    }
+  });
+}
+
+/**
+ * Recupera i changelog per una lista di nodi (con cache)
+ * @param {string} token - Token di autenticazione Jira
+ * @param {Array<string>} nodeKeys - Array di chiavi issue (es. ['FGC-123', 'FGC-456'])
+ * @returns {Promise<Map<string, Object>>} - Map con chiave issue key e valore raw data
+ */
+async function fetchChangelogsForNodes(token, nodeKeys) {
+  const result = new Map();
+  if (!Array.isArray(nodeKeys) || nodeKeys.length === 0) return result;
+  
+  // Filtra le chiavi che non sono già in cache
+  const keysToFetch = nodeKeys.filter(key => !window.__EJ_CHANGELOG_CACHE__[key]);
+  
+  // Aggiungi quelle già in cache al risultato
+  nodeKeys.forEach(key => {
+    if (window.__EJ_CHANGELOG_CACHE__[key]) {
+      result.set(key, window.__EJ_CHANGELOG_CACHE__[key]);
+    }
+  });
+  
+  // Recupera i changelog mancanti in batch (max 50 alla volta per evitare timeout)
+  const batchSize = 50;
+  for (let i = 0; i < keysToFetch.length; i += batchSize) {
+    const batch = keysToFetch.slice(i, i + batchSize);
+    
+    // Recupera in parallelo (con limitazione per non sovraccaricare l'API)
+    const promises = batch.map(async (key) => {
+      try {
+        const raw = await jiraGetIssueRaw(token, key);
+        // Salva in cache
+        window.__EJ_CHANGELOG_CACHE__[key] = raw;
+        result.set(key, raw);
+      } catch (err) {
+        console.warn(`Errore recupero changelog per ${key}:`, err);
+        // In caso di errore, salva null in cache per evitare tentativi ripetuti
+        window.__EJ_CHANGELOG_CACHE__[key] = null;
+        result.set(key, null);
+      }
+    });
+    
+    await Promise.all(promises);
+    
+    // Piccola pausa tra batch per non sovraccaricare l'API
+    if (i + batchSize < keysToFetch.length) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  }
+  
+  return result;
+}
+
 function hideNodeContextMenu() {
   if (nodeContextMenuEl) {
     nodeContextMenuEl.style.display = 'none';
     nodeContextMenuEl.dataset.key = '';
+  }
+}
+
+/**
+ * Estrae la data dell'ultima transizione allo status corrente dal changelog
+ * @param {Object} raw - Dati raw dell'issue Jira (con changelog)
+ * @param {string} currentStatus - Status corrente della card
+ * @returns {Date|null} - Data dell'ultima transizione allo status corrente, o null se non trovata
+ */
+function getLastStatusTransitionDate(raw, currentStatus) {
+  if (!raw?.changelog?.histories || !currentStatus) return null;
+  
+  const histories = raw.changelog.histories;
+  // Cerca dall'ultima modifica alla prima (ordine cronologico inverso)
+  for (let i = histories.length - 1; i >= 0; i--) {
+    const history = histories[i];
+    if (!history.items || !Array.isArray(history.items)) continue;
+    
+    // Cerca transizioni di status
+    for (const item of history.items) {
+      if (item.field === 'status' && item.toString === currentStatus) {
+        // Trovata transizione allo status corrente
+        try {
+          return new Date(history.created);
+        } catch {
+          return null;
+        }
+      }
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * Calcola e formatta il tempo trascorso da una data
+ * @param {Date} date - Data di riferimento
+ * @returns {string|null} - Stringa formattata (es. "3 dias (desde 15/01/2024)") o null
+ */
+function formatTimeInStatus(date) {
+  if (!date || !(date instanceof Date) || isNaN(date.getTime())) return null;
+  
+  const now = new Date();
+  const diffMs = now - date;
+  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+  const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
+  
+  // Formatta la data
+  const day = String(date.getDate()).padStart(2, '0');
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const year = date.getFullYear();
+  const dateStr = `${day}/${month}/${year}`;
+  
+  // Determina l'unità di tempo
+  if (diffDays === 0) {
+    if (diffHours === 0) {
+      const diffMins = Math.floor(diffMs / (1000 * 60));
+      return diffMins <= 1 ? `menos de 1 minuto (desde ${dateStr})` : `${diffMins} minutos (desde ${dateStr})`;
+    }
+    return diffHours === 1 ? `1 hora (desde ${dateStr})` : `${diffHours} horas (desde ${dateStr})`;
+  } else if (diffDays === 1) {
+    return `1 dia (desde ${dateStr})`;
+  } else {
+    return `${diffDays} dias (desde ${dateStr})`;
   }
 }
 
@@ -2556,10 +3445,55 @@ function showNodeContextMenu(event, nodeData, onInspect, onSearch) {
 
 async function inspectNodeDetails(nodeData) {
   try {
+    logBootStep('INSPECT_NODE_START', { nodeKey: nodeData?.key });
+    
     ensureContextUi();
-    if (!inspectModal || !inspectContentEl) return;
+    if (!inspectModal || !inspectContentEl) {
+      logBootStep('INSPECT_NODE_ERROR', { error: 'inspectModal o inspectContentEl non disponibili', hasModal: !!inspectModal, hasContent: !!inspectContentEl });
+      return;
+    }
+    
     const token = CURRENT_AUTH_TOKEN || (await getCreds()).token;
+    logBootStep('INSPECT_NODE_FETCH_RAW', { nodeKey: nodeData.key, hasToken: !!token });
+    
     const raw = await jiraGetIssueRaw(token, nodeData.key);
+    logBootStep('INSPECT_NODE_RAW_RECEIVED', { 
+      nodeKey: nodeData.key,
+      hasRaw: !!raw,
+      rawKeys: raw ? Object.keys(raw).slice(0, 10) : [],
+      rawSize: raw ? JSON.stringify(raw).length : 0
+    });
+    
+    // Salva i dati raw nel dataset del modale per il bump list
+    const rawDataStr = JSON.stringify(raw);
+    inspectModal.dataset.rawData = rawDataStr;
+    logBootStep('INSPECT_NODE_RAW_SAVED', { 
+      nodeKey: nodeData.key,
+      rawDataLength: rawDataStr.length,
+      hasDataset: !!inspectModal.dataset.rawData,
+      datasetLength: inspectModal.dataset.rawData?.length || 0
+    });
+    
+    // Nascondi la sezione bump list quando si carica un nuovo nodo
+    const bumpSection = document.getElementById('ej-inspect-bump-section');
+    const bumpToggleBtn = document.getElementById('ej-inspect-bump-toggle');
+    const bumpContentEl = document.getElementById('ej-inspect-bump-content');
+    
+    logBootStep('INSPECT_NODE_BUMP_ELEMENTS', {
+      hasBumpSection: !!bumpSection,
+      hasBumpToggleBtn: !!bumpToggleBtn,
+      hasBumpContentEl: !!bumpContentEl,
+      bumpSectionVisible: bumpSection?.classList.contains('visible')
+    });
+    
+    if (bumpSection) {
+      bumpSection.classList.remove('visible');
+      logBootStep('INSPECT_NODE_BUMP_HIDDEN', {});
+    }
+    if (bumpToggleBtn) {
+      bumpToggleBtn.textContent = 'Bump list extended';
+      logBootStep('INSPECT_NODE_BUMP_BTN_RESET', {});
+    }
 
     const category = String(nodeData.category || '').toLowerCase();
     let kind = 'task';
@@ -2576,11 +3510,25 @@ async function inspectNodeDetails(nodeData) {
     const lines = [
       `Key: ${nodeData.key}`,
       `Issuetype: ${raw.fields?.issuetype?.name || nodeData.issuetype || ''}`,
-      `Status: ${status}`,
+      `Status: ${status}`
+    ];
+
+    // Aggiungi "Time in [Status]" se disponibile dal changelog
+    if (status) {
+      const lastTransitionDate = getLastStatusTransitionDate(raw, status);
+      if (lastTransitionDate) {
+        const timeInStatus = formatTimeInStatus(lastTransitionDate);
+        if (timeInStatus) {
+          lines.push(`Time in ${status}: ${timeInStatus}`);
+        }
+      }
+    }
+
+    lines.push(
       `Assignee: ${assignee}`,
       `Summary: ${summary}`,
       `Category: ${category}`
-    ];
+    );
 
     if (description) {
       lines.push('', 'Description:', description.trim());
@@ -2600,7 +3548,20 @@ async function inspectNodeDetails(nodeData) {
     inspectContentEl.textContent = finalText || '(nessun dato disponibile)';
     inspectBackdrop.style.display = 'block';
     inspectModal.style.display = 'block';
+    
+    logBootStep('INSPECT_NODE_COMPLETE', {
+      nodeKey: nodeData.key,
+      contentLength: finalText.length,
+      modalDisplay: inspectModal.style.display,
+      backdropDisplay: inspectBackdrop.style.display,
+      hasRawData: !!inspectModal.dataset.rawData
+    });
   } catch (err) {
+    logBootStep('INSPECT_NODE_ERROR_FINAL', {
+      error: err.message,
+      stack: err.stack,
+      nodeKey: nodeData?.key
+    });
     console.error('Inspect node error', err);
     setStatus(`Inspect node: ${err.message || err}`, false);
   }
@@ -3590,6 +4551,33 @@ ${exp}
   currentGraphState.labelSelection = label;
   currentGraphState.linkSelection = link;
   currentGraphState.aiLayer = aiLayer;
+  
+  // Se Time Inertia è attivo, riattivalo dopo il ridisegno
+  if (timeInertiaActive && node && node.size() > 0) {
+    // Usa setTimeout per assicurarsi che il rendering sia completato
+    setTimeout(async () => {
+      if (timeInertiaActive && currentGraphState.nodeSelection) {
+        let token;
+        try {
+          token = CURRENT_AUTH_TOKEN || (await getCreds()).token;
+        } catch {
+          return; // Silently fail se non ci sono credenziali
+        }
+        
+        const nodeKeys = [];
+        currentGraphState.nodeSelection.each(d => {
+          if (!isExcludedStatus(d.status)) {
+            nodeKeys.push(d.key);
+          }
+        });
+        
+        if (nodeKeys.length > 0) {
+          const changelogMap = await fetchChangelogsForNodes(token, nodeKeys);
+          updateTimeInertiaHalos(currentGraphState.nodeSelection, changelogMap);
+        }
+      }
+    }, 100);
+  }
   currentGraphState.nodes = nodes;
   currentGraphState.links = links;
   const nodesMap = new Map();
@@ -4554,6 +5542,36 @@ async function fetchSingleDescription(token, key) {
 })();
 
 async function loadNoEpicCards(token) {
+  // Pulizia cache changelog e reset Time Inertia
+  window.__EJ_CHANGELOG_CACHE__ = {};
+  timeInertiaActive = false;
+  timeInertiaHover = false;
+  
+  // Carica data di ricalcolo Time Inertia dallo storage per NO_EPIC
+  const storageKey = `timeInertiaBaseDate_${NO_EPIC_OPTION}`;
+  try {
+    const result = await chrome.storage.sync.get(storageKey);
+    if (result[storageKey]) {
+      timeInertiaBaseDate = new Date(result[storageKey]);
+      const day = String(timeInertiaBaseDate.getDate()).padStart(2, '0');
+      const month = String(timeInertiaBaseDate.getMonth() + 1).padStart(2, '0');
+      const year = timeInertiaBaseDate.getFullYear();
+      const recalcText = document.getElementById('ej-time-inertia-recalc-text');
+      if (recalcText) {
+        recalcText.textContent = `Dias re-calculados a partir do dia ${day}/${month}/${year}`;
+      }
+    } else {
+      timeInertiaBaseDate = null;
+      const recalcText = document.getElementById('ej-time-inertia-recalc-text');
+      if (recalcText) {
+        recalcText.textContent = '';
+      }
+    }
+  } catch (err) {
+    console.warn('Errore caricamento data Time Inertia:', err);
+    timeInertiaBaseDate = null;
+  }
+  
   try {
     setStatus('Carico card senza epic…');
     const jql = 'sprint in openSprints() AND issuetype != Epic AND parent is EMPTY AND "Epic Link" is EMPTY AND status NOT IN (Closed, "Rejected & Closed", "Pending Development", Backlog)';
