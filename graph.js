@@ -1175,14 +1175,51 @@ async function getCreds() {
   return { token };
 }
 
-// Crea un issue link in Jira (tipo "Relates") tra due card
-async function jiraCreateIssueLink(token, fromKey, toKey) {
+// Crea un issue link in Jira tra due card
+// direction: 'outward' = fromKey fa l'azione verso toKey (es. "tests": A tests B)
+//            'inward' = toKey fa l'azione verso fromKey (es. "is tested by": B is tested by A)
+// Quando direction è 'outward', fromKey è il soggetto (outwardIssue) e toKey è l'oggetto (inwardIssue)
+// Quando direction è 'inward', toKey è il soggetto (outwardIssue) e fromKey è l'oggetto (inwardIssue)
+async function jiraCreateIssueLink(token, fromKey, toKey, linkType = 'Relates', direction = 'outward') {
   const url = `${JIRA_BASE}/rest/api/3/issueLink`;
   const body = {
-    type: { name: 'Relates' },
-    outwardIssue: { key: fromKey },
-    inwardIssue: { key: toKey }
+    type: { name: linkType },
+    // CORREZIONE: La logica era invertita!
+    // Quando l'utente seleziona "tests" (outward): vuole "A tests B" dove A è fromKey
+    // Quando l'utente seleziona "is tested by" (inward): vuole "B is tested by A" dove A è fromKey
+    // In Jira, outwardIssue è sempre il soggetto dell'azione outward, inwardIssue è l'oggetto
+    // Quindi per "tests" (outward): A (fromKey) deve essere outwardIssue
+    // E per "is tested by" (inward): B (toKey) deve essere outwardIssue (perché è il soggetto)
+    // CORREZIONE DEFINITIVA: La logica era invertita!
+    // Quando l'utente seleziona "tests" (outward) e vuole "A tests B":
+    // - A (fromKey) deve essere il soggetto, quindi deve essere outwardIssue
+    // - B (toKey) deve essere l'oggetto, quindi deve essere inwardIssue
+    // Ma Jira interpreta outwardIssue come il soggetto dell'azione, quindi:
+    // Per "tests" (outward): fromKey = outwardIssue, toKey = inwardIssue
+    // Per "is tested by" (inward): toKey = outwardIssue (soggetto), fromKey = inwardIssue
+    // Tuttavia, il risultato era invertito, quindi provo a invertire:
+    outwardIssue: { key: direction === 'outward' ? toKey : fromKey },
+    inwardIssue: { key: direction === 'outward' ? fromKey : toKey }
   };
+  
+  // Log diagnostico dettagliato
+  const debugInfo = {
+    timestamp: new Date().toISOString(),
+    operation: 'CREATE_ISSUE_LINK',
+    url,
+    method: 'POST',
+    requestBody: body,
+    fromKey,
+    toKey,
+    linkType,
+    direction,
+    requestHeaders: {
+      'Authorization': maskAuthHeader(`Basic ${token}`),
+      'Accept': 'application/json',
+      'Content-Type': 'application/json'
+    }
+  };
+  
   const res = await fetch(url, {
     method: 'POST',
     headers: {
@@ -1193,10 +1230,140 @@ async function jiraCreateIssueLink(token, fromKey, toKey) {
     body: JSON.stringify(body),
     credentials: 'omit', cache: 'no-store', mode: 'cors'
   });
-  if (!res.ok) {
-    const txt = await res.text().catch(()=> '');
-    throw new Error(`Link Jira fallito (${res.status}): ${txt.slice(0,180)}`);
+  
+  debugInfo.status = res.status;
+  debugInfo.statusText = res.statusText;
+  
+  // Leggi il testo della risposta (una sola volta)
+  let responseText = '';
+  try { 
+    responseText = await res.text(); 
+    debugInfo.responseText = responseText;
+    try {
+      if (responseText && responseText.trim()) {
+        debugInfo.responseJson = JSON.parse(responseText);
+      }
+    } catch {}
+  } catch (e) {
+    debugInfo.responseTextError = e.message;
   }
+  
+  // Salva per "Copia diagnostica"
+  lastApiDebug = debugInfo;
+  
+  if (!res.ok) {
+    throw new Error(`Link Jira fallito (${res.status}): ${responseText.slice(0,180)}`);
+  }
+  
+  // Se la risposta è vuota (tipico per status 201 Created), restituisci un oggetto vuoto
+  if (!responseText || responseText.trim() === '') {
+    return {};
+  }
+  
+  try {
+    return JSON.parse(responseText);
+  } catch (e) {
+    // Se il parse fallisce, restituisci comunque un oggetto vuoto per status di successo
+    console.warn('[CREATE_LINK] Risposta non JSON valida, ma status OK:', res.status);
+    return {};
+  }
+}
+
+// Recupera i tipi di link disponibili da Jira
+let cachedLinkTypes = null;
+async function jiraGetIssueLinkTypes(token) {
+  const debugInfo = {
+    timestamp: new Date().toISOString(),
+    operation: 'GET_ISSUE_LINK_TYPES',
+    url: `${JIRA_BASE}/rest/api/3/issueLinkType`,
+    method: 'GET',
+    requestHeaders: {
+      'Authorization': maskAuthHeader(`Basic ${token}`),
+      'Accept': 'application/json'
+    },
+    usingCache: !!cachedLinkTypes
+  };
+  
+  if (cachedLinkTypes) {
+    debugInfo.cachedTypes = cachedLinkTypes;
+    lastApiDebug = debugInfo;
+    return cachedLinkTypes;
+  }
+  
+  try {
+    const url = `${JIRA_BASE}/rest/api/3/issueLinkType`;
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Basic ${token}`,
+        'Accept': 'application/json'
+      },
+      credentials: 'omit', cache: 'no-store', mode: 'cors'
+    });
+    
+    debugInfo.status = res.status;
+    debugInfo.statusText = res.statusText;
+    try { 
+      debugInfo.responseText = await res.clone().text(); 
+      try {
+        debugInfo.responseJson = JSON.parse(debugInfo.responseText);
+      } catch {}
+    } catch {}
+    
+    lastApiDebug = debugInfo;
+    
+    if (!res.ok) {
+      console.warn('[LINK_TYPES] API fallita, uso fallback', res.status);
+      return getDefaultLinkTypes();
+    }
+    
+    const data = await res.json();
+    const types = [];
+    if (Array.isArray(data.issueLinkTypes)) {
+      data.issueLinkTypes.forEach(lt => {
+        // lt.name è il nome del tipo di link (es. "Test", "Relates")
+        // lt.inward è il valore inward (es. "is tested by")
+        // lt.outward è il valore outward (es. "tests")
+        if (lt.inward) types.push({ 
+          displayName: lt.inward, 
+          typeName: lt.name, 
+          id: lt.id, 
+          direction: 'inward' 
+        });
+        if (lt.outward) types.push({ 
+          displayName: lt.outward, 
+          typeName: lt.name, 
+          id: lt.id, 
+          direction: 'outward' 
+        });
+      });
+    }
+    
+    cachedLinkTypes = types.length > 0 ? types : getDefaultLinkTypes();
+    debugInfo.parsedTypes = cachedLinkTypes;
+    lastApiDebug = debugInfo;
+    return cachedLinkTypes;
+  } catch (e) {
+    debugInfo.error = e.message;
+    debugInfo.stack = e.stack;
+    lastApiDebug = debugInfo;
+    console.warn('[LINK_TYPES] Errore, uso fallback', e);
+    return getDefaultLinkTypes();
+  }
+}
+
+function getDefaultLinkTypes() {
+  return [
+    { displayName: 'Relates', typeName: 'Relates', id: 'relates', direction: 'outward' },
+    { displayName: 'Blocks', typeName: 'Blocks', id: 'blocks', direction: 'outward' },
+    { displayName: 'is blocked by', typeName: 'Blocks', id: 'blocks', direction: 'inward' },
+    { displayName: 'Implements', typeName: 'Implements', id: 'implements', direction: 'outward' },
+    { displayName: 'is implemented by', typeName: 'Implements', id: 'implements', direction: 'inward' },
+    { displayName: 'Clones', typeName: 'Clones', id: 'clones', direction: 'outward' },
+    { displayName: 'is cloned by', typeName: 'Clones', id: 'clones', direction: 'inward' },
+    { displayName: 'Duplicates', typeName: 'Duplicates', id: 'duplicates', direction: 'outward' },
+    { displayName: 'is duplicated by', typeName: 'Duplicates', id: 'duplicates', direction: 'inward' }
+  ];
 }
 
 // GET /issue/{key}?expand=names,renderedFields,changelog  → restituisce TUTTI i campi disponibili + changelog
@@ -2269,6 +2436,13 @@ function ensureContextUi() {
         z-index: 10004;
         white-space: nowrap;
       }
+      .ej-link-type-menu { position: fixed; z-index: 10007; background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.15); min-width: 220px; max-height: 400px; overflow-y: auto; font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; display: none; }
+      .ej-link-type-menu ul { list-style: none; margin: 0; padding: 6px; }
+      .ej-link-type-menu li { padding: 8px 12px; border-radius: 4px; cursor: pointer; font-size: 14px; }
+      .ej-link-type-menu li:hover { background: #f3f4f6; }
+      .ej-link-type-menu li.selected { background: #dbeafe; color: #1e40af; font-weight: 500; }
+      .ej-link-lasso { stroke: #22c55e; stroke-width: 2; stroke-opacity: 0.8; fill: none; pointer-events: none; }
+      .ej-link-target-highlight { stroke: #3b82f6; stroke-width: 4; stroke-opacity: 0.6; fill: none; pointer-events: none; }
     `;
     document.head.appendChild(style);
   }
@@ -2313,6 +2487,14 @@ function ensureContextUi() {
     document.body.appendChild(nodeContextMenuEl);
   } else {
     nodeContextMenuEl = document.getElementById('ej-node-menu');
+  }
+  if (!document.getElementById('ej-link-type-menu')) {
+    const linkTypeMenu = document.createElement('div');
+    linkTypeMenu.id = 'ej-link-type-menu';
+    linkTypeMenu.className = 'ej-link-type-menu';
+    linkTypeMenu.innerHTML = `<ul id="ej-link-type-list"></ul>`;
+    linkTypeMenu.style.display = 'none';
+    document.body.appendChild(linkTypeMenu);
   }
   if (!document.getElementById('ej-inspect-backdrop')) {
     inspectBackdrop = document.createElement('div');
@@ -3349,6 +3531,122 @@ function hideNodeContextMenu() {
   }
 }
 
+function showLinkTypeMenu(event, fromKey, toKey, onSelect) {
+  const debugInfo = {
+    timestamp: new Date().toISOString(),
+    operation: 'SHOW_LINK_TYPE_MENU',
+    fromKey,
+    toKey,
+    clientX: event.clientX,
+    clientY: event.clientY
+  };
+  console.log('[LINK_MENU] Mostro menu', debugInfo);
+  
+  const menu = document.getElementById('ej-link-type-menu');
+  const list = document.getElementById('ej-link-type-list');
+  if (!menu || !list) {
+    debugInfo.error = 'Menu o list non trovati';
+    lastApiDebug = debugInfo;
+    console.error('[LINK_MENU] Menu non trovato');
+    return;
+  }
+
+  const { clientX, clientY } = event;
+  menu.style.display = 'block';
+  menu.style.left = `${clientX + 6}px`;
+  menu.style.top = `${clientY + 6}px`;
+
+  // Carica i tipi di link
+  getCreds().then(({ token }) => {
+    debugInfo.loadingLinkTypes = true;
+    console.log('[LINK_MENU] Carico tipi di link...');
+    
+    jiraGetIssueLinkTypes(token).then(linkTypes => {
+      debugInfo.linkTypesCount = linkTypes.length;
+      debugInfo.linkTypes = linkTypes.map(lt => ({ displayName: lt.displayName, typeName: lt.typeName }));
+      console.log('[LINK_MENU] Tipi caricati', linkTypes.length, linkTypes.map(lt => lt.displayName));
+      
+      list.innerHTML = '';
+      linkTypes.forEach(lt => {
+        const li = document.createElement('li');
+        li.textContent = lt.displayName;
+        li.onclick = (e) => {
+          e.stopPropagation();
+          const selectDebug = {
+            timestamp: new Date().toISOString(),
+            operation: 'SELECT_LINK_TYPE',
+            fromKey,
+            toKey,
+            selectedDisplayName: lt.displayName,
+            selectedTypeName: lt.typeName,
+            direction: lt.direction,
+            linkTypeData: lt
+          };
+          console.log('[LINK_MENU] Tipo selezionato', selectDebug);
+          lastApiDebug = selectDebug;
+          hideLinkTypeMenu();
+          onSelect(lt.typeName, lt.direction);
+        };
+        list.appendChild(li);
+      });
+      
+      lastApiDebug = debugInfo;
+    }).catch((err) => {
+      debugInfo.error = err.message;
+      debugInfo.stack = err.stack;
+      console.error('[LINK_MENU] Errore caricamento tipi', err);
+      
+      // Fallback a lista default
+      const defaultTypes = getDefaultLinkTypes();
+      debugInfo.usingFallback = true;
+      debugInfo.fallbackTypes = defaultTypes.map(lt => ({ displayName: lt.displayName, typeName: lt.typeName }));
+      console.log('[LINK_MENU] Uso fallback', defaultTypes.length);
+      
+      list.innerHTML = '';
+      defaultTypes.forEach(lt => {
+        const li = document.createElement('li');
+        li.textContent = lt.displayName;
+        li.onclick = (e) => {
+          e.stopPropagation();
+          const selectDebug = {
+            timestamp: new Date().toISOString(),
+            operation: 'SELECT_LINK_TYPE',
+            fromKey,
+            toKey,
+            selectedDisplayName: lt.displayName,
+            selectedTypeName: lt.typeName,
+            direction: lt.direction,
+            linkTypeData: lt,
+            usingFallback: true
+          };
+          console.log('[LINK_MENU] Tipo selezionato (fallback)', selectDebug);
+          lastApiDebug = selectDebug;
+          hideLinkTypeMenu();
+          onSelect(lt.typeName, lt.direction);
+        };
+        list.appendChild(li);
+      });
+      
+      lastApiDebug = debugInfo;
+    });
+  }).catch((err) => {
+    debugInfo.credsError = err.message;
+    console.error('[LINK_MENU] Errore credenziali', err);
+    lastApiDebug = debugInfo;
+  });
+
+  const hideLater = () => hideLinkTypeMenu();
+  setTimeout(() => document.addEventListener('click', hideLater, { once: true }), 0);
+}
+
+function hideLinkTypeMenu() {
+  const menu = document.getElementById('ej-link-type-menu');
+  if (menu) {
+    console.log('[LINK_MENU] Nascondo menu');
+    menu.style.display = 'none';
+  }
+}
+
 /**
  * Estrae la data dell'ultima transizione allo status corrente dal changelog
  * @param {Object} raw - Dati raw dell'issue Jira (con changelog)
@@ -3577,6 +3875,12 @@ function renderForceGraph(nodes, links, epicKey, groups = { hierLinks: [], relLi
   height = rect.height || (window.innerHeight - 56);
   svg.attr('width', width).attr('height', height);
   const stage = svg.append('g').attr('class', 'stage');
+
+  // Variabili per il laccio ALT + tasto destro
+  let altRightClickLasso = null;
+  let altRightClickStart = null;
+  let altRightClickTargetHighlight = null;
+  let altRightClickActive = false;
 
   // ===== UI: menu contestuale + modale "Explicação" =====
   ensureContextUi();
@@ -4028,14 +4332,21 @@ ${exp}
     const p = d3.pointer(event, stage.node());
     const target = findNodeAt(nodes, p[0], p[1]);
     if (target && target.id !== linkStart.id) {
-      jiraCreateIssueLink(CURRENT_AUTH_TOKEN, linkStart.id, target.id)
-        .then(() => {
-          setStatus(`Creato link: ${linkStart.id} → ${target.id}`);
-          links.push({ source: linkStart.id, target: target.id, kind: 'rel' });
-          renderForceGraph(nodes, links, epicKey, groups);
-        })
-        .catch(e => setStatus(e.message || String(e), false))
-        .finally(cleanupTemp);
+      // Salva gli ID in variabili locali per usarli nel callback asincrono
+      const fromKey = linkStart.id;
+      const toKey = target.id;
+      
+      // Mostra menu per selezionare il tipo di link
+      showLinkTypeMenu(event, fromKey, toKey, (linkType, direction) => {
+        jiraCreateIssueLink(CURRENT_AUTH_TOKEN, fromKey, toKey, linkType, direction)
+          .then(() => {
+            setStatus(`Creato link ${linkType}: ${fromKey} → ${toKey}`);
+            links.push({ source: fromKey, target: toKey, kind: 'rel', label: linkType });
+            renderForceGraph(nodes, links, epicKey, groups);
+          })
+          .catch(e => setStatus(e.message || String(e), false));
+        cleanupTemp();
+      });
     } else {
       cleanupTemp();
     }
@@ -4521,19 +4832,216 @@ ${exp}
     }
   });
 
-  // Click destro: mostra menu contestuale (inspect / search)
+  // Click destro: mostra menu contestuale (inspect / search) o attiva laccio se ALT premuto
   node.on('contextmenu', (event, d) => {
     event.preventDefault();
-    showNodeContextMenu(
-      event,
-      d,
-      (nodeData) => {
-        inspectNodeDetails(nodeData);
-      },
-      (nodeData) => {
-        handleNodeContextMenu(event, nodeData);
+    
+    // Se ALT è premuto, attiva il laccio per creare link
+    if (event.altKey) {
+      const debugInfo = {
+        timestamp: new Date().toISOString(),
+        operation: 'ALT_RIGHT_CLICK_START',
+        sourceNode: d.id,
+        sourceKey: d.key,
+        clientX: event.clientX,
+        clientY: event.clientY
+      };
+      console.log('[ALT_LINK] Inizio laccio', debugInfo);
+      lastApiDebug = debugInfo;
+      
+      // Cancella eventuale laccio precedente
+      if (altRightClickLasso) {
+        altRightClickLasso.remove();
+        altRightClickLasso = null;
       }
-    );
+      if (altRightClickTargetHighlight) {
+        altRightClickTargetHighlight.remove();
+        altRightClickTargetHighlight = null;
+      }
+      
+      altRightClickStart = d;
+      altRightClickActive = true;
+      
+      // Crea il laccio che parte dal nodo sorgente
+      const startP = [d.x || 0, d.y || 0];
+      altRightClickLasso = stage.append('line')
+        .attr('class', 'ej-link-lasso')
+        .attr('x1', startP[0])
+        .attr('y1', startP[1])
+        .attr('x2', startP[0])
+        .attr('y2', startP[1])
+        .attr('pointer-events', 'none');
+      
+      setStatus(`ALT+Click destro: seleziona il nodo di destinazione (rilascia il mouse su un nodo)`);
+      
+      // Funzione per aggiornare il laccio seguendo il mouse
+      const updateLasso = (moveEvent) => {
+        if (!altRightClickLasso || !altRightClickActive) return;
+        
+        const p = d3.pointer(moveEvent, stage.node());
+        altRightClickLasso
+          .attr('x2', p[0])
+          .attr('y2', p[1]);
+        
+        // Controlla se il mouse è su un nodo target
+        const target = findNodeAt(nodes, p[0], p[1]);
+        
+        // Rimuovi highlight precedente
+        if (altRightClickTargetHighlight) {
+          altRightClickTargetHighlight.remove();
+          altRightClickTargetHighlight = null;
+        }
+        
+        // Evidenzia il nodo target se diverso dal sorgente
+        if (target && target.id !== altRightClickStart.id) {
+          const targetNode = svg.selectAll('g.node').filter(n => n && n.id === target.id);
+          if (targetNode.size() > 0) {
+            const nodeData = targetNode.datum();
+            altRightClickTargetHighlight = stage.append('circle')
+              .attr('class', 'ej-link-target-highlight')
+              .attr('cx', nodeData.x || 0)
+              .attr('cy', nodeData.y || 0)
+              .attr('r', (nodeData.id === epicKey ? 10 : 7) + 4)
+              .attr('pointer-events', 'none');
+          }
+        }
+      };
+      
+      // Funzione per completare il link quando si rilascia il mouse
+      const completeLink = (upEvent) => {
+        if (!altRightClickActive || !altRightClickStart) {
+          cleanupAltRightClick();
+          return;
+        }
+        
+        const p = d3.pointer(upEvent, stage.node());
+        const target = findNodeAt(nodes, p[0], p[1]);
+        
+        const debugInfo = {
+          timestamp: new Date().toISOString(),
+          operation: 'ALT_RIGHT_CLICK_COMPLETE',
+          sourceNode: altRightClickStart.id,
+          sourceKey: altRightClickStart.key,
+          targetNode: target ? target.id : null,
+          targetKey: target ? target.key : null,
+          mousePosition: { x: p[0], y: p[1] }
+        };
+        console.log('[ALT_LINK] Completamento laccio', debugInfo);
+        
+        if (target && target.id !== altRightClickStart.id) {
+          // Salva gli ID in variabili locali per usarli nel callback asincrono
+          const fromKey = altRightClickStart.id;
+          const fromKeyFull = altRightClickStart.key;
+          const toKey = target.id;
+          const toKeyFull = target.key;
+          
+          // Mostra menu per selezionare il tipo di link
+          debugInfo.showingMenu = true;
+          lastApiDebug = debugInfo;
+          
+          showLinkTypeMenu(upEvent, fromKey, toKey, (linkType, direction) => {
+            const createDebug = {
+              timestamp: new Date().toISOString(),
+              operation: 'CREATE_LINK_FROM_ALT_RIGHT_CLICK',
+              sourceNode: fromKey,
+              sourceKey: fromKeyFull,
+              targetNode: toKey,
+              targetKey: toKeyFull,
+              linkType,
+              direction
+            };
+            console.log('[ALT_LINK] Creo link', createDebug);
+            lastApiDebug = createDebug;
+            
+            jiraCreateIssueLink(CURRENT_AUTH_TOKEN, fromKey, toKey, linkType, direction)
+              .then((result) => {
+                const successDebug = {
+                  timestamp: new Date().toISOString(),
+                  operation: 'CREATE_LINK_SUCCESS',
+                  sourceNode: fromKey,
+                  targetNode: toKey,
+                  linkType,
+                  direction,
+                  result
+                };
+                console.log('[ALT_LINK] Link creato con successo', successDebug);
+                lastApiDebug = successDebug;
+                
+                setStatus(`Creato link ${linkType}: ${fromKey} → ${toKey}`);
+                links.push({ source: fromKey, target: toKey, kind: 'rel', label: linkType });
+                renderForceGraph(nodes, links, epicKey, groups);
+              })
+              .catch((e) => {
+                const errorDebug = {
+                  timestamp: new Date().toISOString(),
+                  operation: 'CREATE_LINK_ERROR',
+                  sourceNode: fromKey,
+                  targetNode: toKey,
+                  linkType,
+                  direction,
+                  error: e.message,
+                  stack: e.stack
+                };
+                console.error('[ALT_LINK] Errore creazione link', errorDebug);
+                lastApiDebug = errorDebug;
+                setStatus(e.message || String(e), false);
+              });
+          });
+        } else {
+          debugInfo.noTarget = true;
+          console.log('[ALT_LINK] Nessun target valido', debugInfo);
+          lastApiDebug = debugInfo;
+          setStatus('Nessun nodo di destinazione selezionato', false);
+        }
+        
+        cleanupAltRightClick();
+      };
+      
+      // Funzione per pulire il laccio
+      const cleanupAltRightClick = () => {
+        if (altRightClickLasso) {
+          altRightClickLasso.remove();
+          altRightClickLasso = null;
+        }
+        if (altRightClickTargetHighlight) {
+          altRightClickTargetHighlight.remove();
+          altRightClickTargetHighlight = null;
+        }
+        altRightClickStart = null;
+        altRightClickActive = false;
+        svg.on('.altrightclick', null);
+      };
+      
+      // Attacca event listeners
+      svg.on('mousemove.altrightclick', updateLasso)
+         .on('mouseup.altrightclick', completeLink)
+         .on('contextmenu.altrightclick', (e) => {
+           e.preventDefault();
+           cleanupAltRightClick();
+         });
+      
+      // Timeout per cancellare se non viene completato
+      setTimeout(() => {
+        if (altRightClickActive && altRightClickStart && altRightClickStart.id === d.id) {
+          console.log('[ALT_LINK] Timeout, pulizia laccio');
+          cleanupAltRightClick();
+          setStatus('Timeout: laccio annullato', false);
+        }
+      }, 10000);
+      
+    } else {
+      // Comportamento normale: mostra menu contestuale
+      showNodeContextMenu(
+        event,
+        d,
+        (nodeData) => {
+          inspectNodeDetails(nodeData);
+        },
+        (nodeData) => {
+          handleNodeContextMenu(event, nodeData);
+        }
+      );
+    }
   });
 
   const label = stage.append('g')
