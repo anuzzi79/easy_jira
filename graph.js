@@ -1908,6 +1908,8 @@ async function loadGraph(epicKeyRaw) {
   timeInertiaActive = false;
   timeInertiaHover = false;
   timeInertiaBaseDate = null; // Verrà ricaricato dallo storage per l'epico corrente
+  timeInertiaFilterDays = null; // Resetta il filtro
+  timeInertiaFilterDays = null; // Resetta il filtro
   
   try {
     setStatus('Caricamento credenziali…');
@@ -1935,20 +1937,8 @@ async function loadGraph(epicKeyRaw) {
       const result = await chrome.storage.sync.get(storageKey);
       if (result[storageKey]) {
         timeInertiaBaseDate = new Date(result[storageKey]);
-        // Aggiorna il testo
-        const day = String(timeInertiaBaseDate.getDate()).padStart(2, '0');
-        const month = String(timeInertiaBaseDate.getMonth() + 1).padStart(2, '0');
-        const year = timeInertiaBaseDate.getFullYear();
-        const recalcText = document.getElementById('ej-time-inertia-recalc-text');
-        if (recalcText) {
-          recalcText.textContent = `Dias re-calculados a partir do dia ${day}/${month}/${year}`;
-        }
       } else {
         timeInertiaBaseDate = null;
-        const recalcText = document.getElementById('ej-time-inertia-recalc-text');
-        if (recalcText) {
-          recalcText.textContent = '';
-        }
       }
     } catch (err) {
       console.warn('Errore caricamento data Time Inertia:', err);
@@ -2373,69 +2363,6 @@ function ensureContextUi() {
         pointer-events: none;
         transition: opacity 0.6s ease-out;
       }
-      .ej-time-inertia-dots {
-        position: fixed;
-        bottom: 75px;
-        left: 260px;
-        width: 30px;
-        height: 20px;
-        cursor: pointer;
-        z-index: 10005;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 3px;
-        color: #64748b;
-        font-size: 16px;
-        font-weight: bold;
-        user-select: none;
-      }
-      .ej-time-inertia-dots:hover {
-        color: #3b82f6;
-      }
-      .ej-time-inertia-date-picker {
-        position: fixed;
-        bottom: 100px;
-        left: 260px;
-        background: white;
-        border: 1px solid #e5e7eb;
-        border-radius: 8px;
-        padding: 12px;
-        box-shadow: 0 8px 24px rgba(0,0,0,0.15);
-        z-index: 10006;
-        display: none;
-      }
-      .ej-time-inertia-date-picker.visible {
-        display: block;
-      }
-      .ej-time-inertia-date-picker input[type="date"] {
-        padding: 6px 10px;
-        border: 1px solid #cbd5e1;
-        border-radius: 4px;
-        font-size: 14px;
-      }
-      .ej-time-inertia-date-picker button {
-        margin-top: 8px;
-        padding: 6px 12px;
-        background: #3b82f6;
-        color: white;
-        border: none;
-        border-radius: 4px;
-        cursor: pointer;
-        font-size: 13px;
-      }
-      .ej-time-inertia-date-picker button:hover {
-        background: #2563eb;
-      }
-      .ej-time-inertia-recalc-text {
-        position: fixed;
-        bottom: 20px;
-        left: 330px;
-        font-size: 11px;
-        color: #64748b;
-        z-index: 10004;
-        white-space: nowrap;
-      }
       .ej-link-type-menu { position: fixed; z-index: 10007; background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.15); min-width: 220px; max-height: 400px; overflow-y: auto; font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; display: none; }
       .ej-link-type-menu ul { list-style: none; margin: 0; padding: 6px; }
       .ej-link-type-menu li { padding: 8px 12px; border-radius: 4px; cursor: pointer; font-size: 14px; }
@@ -2443,6 +2370,59 @@ function ensureContextUi() {
       .ej-link-type-menu li.selected { background: #dbeafe; color: #1e40af; font-weight: 500; }
       .ej-link-lasso { stroke: #22c55e; stroke-width: 2; stroke-opacity: 0.8; fill: none; pointer-events: none; }
       .ej-link-target-highlight { stroke: #3b82f6; stroke-width: 4; stroke-opacity: 0.6; fill: none; pointer-events: none; }
+      .ej-time-inertia-horizontal-line {
+        position: fixed;
+        height: 2px;
+        background-color: #3b82f6;
+        z-index: 10003;
+        pointer-events: none;
+        opacity: 0.7;
+        display: none;
+        transition: opacity 0.3s ease;
+      }
+      .ej-time-inertia-horizontal-line.visible {
+        display: block;
+      }
+      .ej-time-inertia-horizontal-line-handle {
+        position: fixed;
+        width: 16px;
+        height: 16px;
+        border-radius: 50%;
+        background-color: #ef4444;
+        border: 2px solid #fff;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+        z-index: 10004;
+        pointer-events: all;
+        cursor: grab;
+        transform: translate(-50%, -50%);
+        transition: transform 0.1s ease;
+        display: none;
+      }
+      .ej-time-inertia-horizontal-line-handle.visible {
+        display: block;
+      }
+      .ej-time-inertia-horizontal-line-handle:active {
+        cursor: grabbing;
+        transform: translate(-50%, -50%) scale(1.2);
+      }
+      .ej-time-inertia-line-label {
+        position: fixed;
+        background-color: rgba(0, 0, 0, 0.8);
+        color: white;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-size: 12px;
+        font-weight: 600;
+        z-index: 10005;
+        pointer-events: none;
+        white-space: nowrap;
+        transform: translate(-50%, -100%);
+        margin-bottom: 8px;
+        display: none;
+      }
+      .ej-time-inertia-line-label.visible {
+        display: block;
+      }
     `;
     document.head.appendChild(style);
   }
@@ -2501,7 +2481,7 @@ function ensureContextUi() {
     inspectBackdrop.id = 'ej-inspect-backdrop';
     inspectBackdrop.className = 'ej-inspect-backdrop';
     document.body.appendChild(inspectBackdrop);
-  } else {
+    } else {
     inspectBackdrop = document.getElementById('ej-inspect-backdrop');
   }
   if (!document.getElementById('ej-inspect-modal')) {
@@ -2764,6 +2744,11 @@ function ensureContextUi() {
       // Aggiorna gli aloni
       updateTimeInertiaHalos(nodeSelection, changelogMap);
       
+      // Aggiorna la posizione della linea (calcola Dmax)
+      if (window.updateTimeInertiaLinePosition) {
+        window.updateTimeInertiaLinePosition();
+      }
+      
       setStatus(`Time Inertia attivato (${changelogMap.size} nodi)`, true);
     }
     
@@ -2792,6 +2777,10 @@ function ensureContextUi() {
             }
           });
           updateTimeInertiaHalos(nodeSelection, changelogMap);
+          // Aggiorna anche la posizione della linea
+          if (window.updateTimeInertiaLinePosition) {
+            window.updateTimeInertiaLinePosition();
+          }
         }
       }
     });
@@ -2837,160 +2826,245 @@ function ensureContextUi() {
           removeTimeInertiaHalos(nodeSelection);
         }
         timeInertiaBtn.classList.remove('active');
+        // Resetta il filtro
+        timeInertiaFilterDays = null;
         setStatus('Time Inertia disattivato', true);
       }
+      
+      // Toggle della linea orizzontale
+    const line = document.getElementById('ej-time-inertia-horizontal-line');
+    const handle = document.getElementById('ej-time-inertia-horizontal-line-handle');
+      if (line) {
+        const isVisible = line.classList.contains('visible');
+        if (isVisible) {
+          line.classList.remove('visible');
+          if (handle) handle.classList.remove('visible');
+          // Quando la linea viene nascosta, mostra tutti gli aloni (resetta il filtro)
+          timeInertiaFilterDays = null;
+          // Aggiorna gli aloni se Time Inertia è attivo
+          if (timeInertiaActive) {
+            const nodeSelection = currentGraphState.nodeSelection;
+            if (nodeSelection && nodeSelection.size()) {
+              const changelogMap = new Map();
+              nodeSelection.each(d => {
+                if (window.__EJ_CHANGELOG_CACHE__[d.key]) {
+                  changelogMap.set(d.key, window.__EJ_CHANGELOG_CACHE__[d.key]);
+                }
+              });
+              updateTimeInertiaHalos(nodeSelection, changelogMap);
+            }
+          }
+        } else {
+          line.classList.add('visible');
+          if (handle) handle.classList.add('visible');
+          // Aggiorna la posizione quando viene mostrata
+          if (window.updateTimeInertiaLinePosition) {
+            window.updateTimeInertiaLinePosition();
+          }
+          // Inizializza il filtro con il valore del pallino (se presente) o null (mostra tutti)
+          const savedDaysAgo = handle ? parseFloat(handle.dataset.daysAgo) : null;
+          timeInertiaFilterDays = isNaN(savedDaysAgo) ? null : savedDaysAgo;
+          // Aggiorna gli aloni se Time Inertia è attivo
+          if (timeInertiaActive) {
+            const nodeSelection = currentGraphState.nodeSelection;
+            if (nodeSelection && nodeSelection.size()) {
+              const changelogMap = new Map();
+              nodeSelection.each(d => {
+                if (window.__EJ_CHANGELOG_CACHE__[d.key]) {
+                  changelogMap.set(d.key, window.__EJ_CHANGELOG_CACHE__[d.key]);
+                }
+              });
+              updateTimeInertiaHalos(nodeSelection, changelogMap);
+            }
+          }
+        }
+      }
     });
   }
   
-  // Tre puntini per date picker
-  let timeInertiaDots = document.getElementById('ej-time-inertia-dots');
-  if (!timeInertiaDots) {
-    timeInertiaDots = document.createElement('div');
-    timeInertiaDots.id = 'ej-time-inertia-dots';
-    timeInertiaDots.className = 'ej-time-inertia-dots';
-    timeInertiaDots.innerHTML = '⋮';
-    document.body.appendChild(timeInertiaDots);
+  // Linea orizzontale Time Inertia
+  let timeInertiaLine = document.getElementById('ej-time-inertia-horizontal-line');
+  if (!timeInertiaLine) {
+    timeInertiaLine = document.createElement('div');
+    timeInertiaLine.id = 'ej-time-inertia-horizontal-line';
+    timeInertiaLine.className = 'ej-time-inertia-horizontal-line';
+    document.body.appendChild(timeInertiaLine);
   }
   
-  // Date picker
-  let timeInertiaDatePicker = document.getElementById('ej-time-inertia-date-picker');
-  if (!timeInertiaDatePicker) {
-    timeInertiaDatePicker = document.createElement('div');
-    timeInertiaDatePicker.id = 'ej-time-inertia-date-picker';
-    timeInertiaDatePicker.className = 'ej-time-inertia-date-picker';
-    timeInertiaDatePicker.innerHTML = `
-      <label style="display: block; margin-bottom: 6px; font-size: 12px; color: #475569;">Data di ricalcolo:</label>
-      <input type="date" id="ej-time-inertia-date-input" style="width: 100%;">
-      <button id="ej-time-inertia-date-apply">Applica</button>
-      <button id="ej-time-inertia-date-clear" style="margin-left: 6px; background: #ef4444;">Rimuovi</button>
-    `;
-    document.body.appendChild(timeInertiaDatePicker);
-  }
-  
-  // Testo ricalcolo
-  let timeInertiaRecalcText = document.getElementById('ej-time-inertia-recalc-text');
-  if (!timeInertiaRecalcText) {
-    timeInertiaRecalcText = document.createElement('div');
-    timeInertiaRecalcText.id = 'ej-time-inertia-recalc-text';
-    timeInertiaRecalcText.className = 'ej-time-inertia-recalc-text';
-    document.body.appendChild(timeInertiaRecalcText);
-  }
-  
-  // Event handlers per i tre puntini
-  if (timeInertiaDots && !timeInertiaDots.dataset.handlersAdded) {
-    timeInertiaDots.dataset.handlersAdded = '1';
+  // Handle (pallino) per la linea orizzontale Time Inertia
+  let timeInertiaLineHandle = document.getElementById('ej-time-inertia-horizontal-line-handle');
+  if (!timeInertiaLineHandle) {
+    timeInertiaLineHandle = document.createElement('div');
+    timeInertiaLineHandle.id = 'ej-time-inertia-horizontal-line-handle';
+    timeInertiaLineHandle.className = 'ej-time-inertia-horizontal-line-handle';
+    document.body.appendChild(timeInertiaLineHandle);
     
-    timeInertiaDots.addEventListener('click', (e) => {
+    // Etichetta per mostrare "X days ago"
+    let timeInertiaLineLabel = document.getElementById('ej-time-inertia-line-label');
+    if (!timeInertiaLineLabel) {
+      timeInertiaLineLabel = document.createElement('div');
+      timeInertiaLineLabel.id = 'ej-time-inertia-line-label';
+      timeInertiaLineLabel.className = 'ej-time-inertia-line-label';
+      document.body.appendChild(timeInertiaLineLabel);
+    }
+    
+    // Implementa il drag del pallino
+    let isDragging = false;
+    let startX = 0;
+    let lineStartX = 0;
+    let lineWidth = 0;
+    
+    timeInertiaLineHandle.addEventListener('mousedown', (e) => {
+      e.preventDefault();
       e.stopPropagation();
-      const picker = document.getElementById('ej-time-inertia-date-picker');
-      if (picker) {
-        picker.classList.toggle('visible');
-      }
+      isDragging = true;
+      
+      const line = document.getElementById('ej-time-inertia-horizontal-line');
+      if (!line) return;
+      
+      const lineRect = line.getBoundingClientRect();
+      lineStartX = lineRect.left;
+      lineWidth = lineRect.width;
+      startX = e.clientX;
+      
+      // Marca come posizionato manualmente
+      timeInertiaLineHandle.dataset.manuallyPositioned = 'true';
+      
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
     });
     
-    // Chiudi picker quando si clicca fuori
-    document.addEventListener('click', (e) => {
-      const picker = document.getElementById('ej-time-inertia-date-picker');
-      const dots = document.getElementById('ej-time-inertia-dots');
-      if (picker && dots && !picker.contains(e.target) && !dots.contains(e.target)) {
-        picker.classList.remove('visible');
+    function handleMouseMove(e) {
+      if (!isDragging) return;
+      
+      const line = document.getElementById('ej-time-inertia-horizontal-line');
+      const label = document.getElementById('ej-time-inertia-line-label');
+      if (!line) return;
+      
+      const deltaX = e.clientX - startX;
+      const currentHandleX = parseFloat(timeInertiaLineHandle.style.left) || (lineStartX + lineWidth / 2);
+      const newX = currentHandleX + deltaX;
+      
+      // Limita il movimento del pallino entro i bordi della linea
+      const lineRect = line.getBoundingClientRect();
+      const minX = lineRect.left;
+      const maxX = lineRect.right;
+      
+      const clampedX = Math.max(minX, Math.min(maxX, newX));
+      timeInertiaLineHandle.style.left = `${clampedX}px`;
+      
+      // Calcola la posizione relativa sulla linea (0 = sinistra/Dmax, 1 = destra/oggi)
+      const currentLineWidth = lineRect.width;
+      const relativePosition = (clampedX - minX) / currentLineWidth;
+      
+      // Salva la posizione relativa come attributo del handle per uso dopo zoom
+      timeInertiaLineHandle.dataset.relativePosition = relativePosition.toString();
+      
+      // Recupera Dmax dalla linea
+      const dMax = parseFloat(line.dataset.dmax) || 0;
+      
+      // Calcola i giorni: interpolazione lineare
+      // Sinistra (0) = Dmax giorni fa, Destra (1) = 0 giorni fa (oggi)
+      const daysAgo = Math.round(dMax * (1 - relativePosition));
+      
+      // Salva sia la posizione relativa che il valore daysAgo (per mantenere lo stesso valore dopo zoom)
+      timeInertiaLineHandle.dataset.daysAgo = daysAgo.toString();
+      
+      // Aggiorna il filtro globale per gli aloni
+      timeInertiaFilterDays = daysAgo;
+      
+      // Aggiorna gli aloni in tempo reale quando il pallino viene spostato
+      if (timeInertiaActive) {
+        const nodeSelection = currentGraphState.nodeSelection;
+        if (nodeSelection && nodeSelection.size()) {
+          // Ricrea la map dai dati in cache
+          const changelogMap = new Map();
+          nodeSelection.each(d => {
+            if (window.__EJ_CHANGELOG_CACHE__[d.key]) {
+              changelogMap.set(d.key, window.__EJ_CHANGELOG_CACHE__[d.key]);
+            }
+          });
+          updateTimeInertiaHalos(nodeSelection, changelogMap);
+        }
+      }
+      
+      // Mostra l'etichetta
+      if (label) {
+        label.textContent = `${daysAgo} days ago`;
+        label.style.left = `${clampedX}px`;
+        label.style.top = `${lineRect.top - 8}px`;
+        label.classList.add('visible');
+      }
+      
+      // Aggiorna startX per il prossimo movimento
+      startX = e.clientX;
+    }
+    
+    function handleMouseUp() {
+      isDragging = false;
+      const label = document.getElementById('ej-time-inertia-line-label');
+      if (label) {
+        label.classList.remove('visible');
+      }
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    }
+  }
+  
+  // Listener per il resize della finestra (aggiorna posizione linea)
+  if (!window.timeInertiaResizeListenerAdded) {
+    window.timeInertiaResizeListenerAdded = true;
+    window.addEventListener('resize', () => {
+      const line = document.getElementById('ej-time-inertia-horizontal-line');
+      if (line && line.classList.contains('visible')) {
+        if (window.updateTimeInertiaLinePosition) {
+          window.updateTimeInertiaLinePosition();
+        }
+        // Ricalcola anche la posizione del pallino dopo il resize
+        recalculateHandlePositionAfterZoom();
       }
     });
   }
   
-  // Event handlers per date picker
-  const dateInput = document.getElementById('ej-time-inertia-date-input');
-  const dateApplyBtn = document.getElementById('ej-time-inertia-date-apply');
-  const dateClearBtn = document.getElementById('ej-time-inertia-date-clear');
-  
-  if (dateApplyBtn && !dateApplyBtn.dataset.handlersAdded) {
-    dateApplyBtn.dataset.handlersAdded = '1';
+  // Listener per lo zoom della pagina (aggiorna posizione pallino)
+  if (!window.timeInertiaZoomListenerAdded) {
+    window.timeInertiaZoomListenerAdded = true;
     
-    dateApplyBtn.addEventListener('click', async () => {
-      const dateValue = dateInput?.value;
-      if (!dateValue) return;
+    let zoomTimeout = null;
+    let lastZoomLevel = window.devicePixelRatio || 1;
+    
+    // Funzione per rilevare lo zoom
+    function detectZoom() {
+      const currentZoom = window.devicePixelRatio || 1;
       
-      const date = new Date(dateValue);
-      const storageKey = `timeInertiaBaseDate_${CURRENT_EPIC_KEY || 'NO_EPIC'}`;
-      
-      try {
-        await chrome.storage.sync.set({ [storageKey]: date.toISOString() });
+      // Se lo zoom è cambiato, ricalcola la posizione del pallino
+      if (Math.abs(currentZoom - lastZoomLevel) > 0.01) {
+        lastZoomLevel = currentZoom;
         
-        // Aggiorna il testo
-        const day = String(date.getDate()).padStart(2, '0');
-        const month = String(date.getMonth() + 1).padStart(2, '0');
-        const year = date.getFullYear();
-        const recalcText = document.getElementById('ej-time-inertia-recalc-text');
-        if (recalcText) {
-          recalcText.textContent = `Dias re-calculados a partir do dia ${day}/${month}/${year}`;
-        }
-        
-        // Nascondi picker
-        const picker = document.getElementById('ej-time-inertia-date-picker');
-        if (picker) picker.classList.remove('visible');
-        
-        // Se Time Inertia è attivo, riaggiorna gli aloni
-        if (timeInertiaActive) {
-          const nodeSelection = currentGraphState.nodeSelection;
-          if (nodeSelection && nodeSelection.size()) {
-            const changelogMap = new Map();
-            nodeSelection.each(d => {
-              if (window.__EJ_CHANGELOG_CACHE__[d.key]) {
-                changelogMap.set(d.key, window.__EJ_CHANGELOG_CACHE__[d.key]);
-              }
-            });
-            updateTimeInertiaHalos(nodeSelection, changelogMap);
-          }
-        }
-        
-        setStatus('Data di ricalcolo salvata', true);
-      } catch (err) {
-        console.error('Errore salvataggio data:', err);
-        setStatus('Errore nel salvataggio della data', false);
+        // Usa un timeout per evitare troppi ricalcoli durante lo zoom continuo
+        if (zoomTimeout) clearTimeout(zoomTimeout);
+        zoomTimeout = setTimeout(() => {
+          recalculateHandlePositionAfterZoom();
+        }, 100);
       }
-    });
+    }
+    
+    // Listener per wheel con Ctrl (zoom browser)
+    window.addEventListener('wheel', (e) => {
+      if (e.ctrlKey) {
+        // Zoom browser rilevato, aspetta un po' e ricalcola
+        if (zoomTimeout) clearTimeout(zoomTimeout);
+        zoomTimeout = setTimeout(() => {
+          detectZoom();
+          recalculateHandlePositionAfterZoom();
+        }, 150);
+      }
+    }, { passive: true });
+    
+    // Nota: il listener resize principale già gestisce il ricalcolo del pallino
+    // Questo listener aggiuntivo è solo per rilevare zoom tramite devicePixelRatio
   }
   
-  if (dateClearBtn && !dateClearBtn.dataset.handlersAdded) {
-    dateClearBtn.dataset.handlersAdded = '1';
-    
-    dateClearBtn.addEventListener('click', async () => {
-      const storageKey = `timeInertiaBaseDate_${CURRENT_EPIC_KEY || 'NO_EPIC'}`;
-      
-      try {
-        await chrome.storage.sync.remove(storageKey);
-        
-        // Rimuovi il testo
-        const recalcText = document.getElementById('ej-time-inertia-recalc-text');
-        if (recalcText) {
-          recalcText.textContent = '';
-        }
-        
-        // Nascondi picker
-        const picker = document.getElementById('ej-time-inertia-date-picker');
-        if (picker) picker.classList.remove('visible');
-        
-        // Se Time Inertia è attivo, riaggiorna gli aloni
-        if (timeInertiaActive) {
-          const nodeSelection = currentGraphState.nodeSelection;
-          if (nodeSelection && nodeSelection.size()) {
-            const changelogMap = new Map();
-            nodeSelection.each(d => {
-              if (window.__EJ_CHANGELOG_CACHE__[d.key]) {
-                changelogMap.set(d.key, window.__EJ_CHANGELOG_CACHE__[d.key]);
-              }
-            });
-            updateTimeInertiaHalos(nodeSelection, changelogMap);
-          }
-        }
-        
-        setStatus('Data di ricalcolo rimossa', true);
-      } catch (err) {
-        console.error('Errore rimozione data:', err);
-        setStatus('Errore nella rimozione della data', false);
-      }
-    });
-  }
 }
 
 /**
@@ -3180,7 +3254,7 @@ async function handleSpecificEpicOk() {
       const specificOpt = Array.from(epicSelect.options).find(o => o.value === SPECIFIC_EPIC_OPTION);
       if (specificOpt) {
         epicSelect.insertBefore(opt, specificOpt);
-      } else {
+    } else {
         epicSelect.appendChild(opt);
       }
     }
@@ -3294,6 +3368,7 @@ window.__EJ_CHANGELOG_CACHE__ = window.__EJ_CHANGELOG_CACHE__ || {};
 let timeInertiaActive = false;
 let timeInertiaHover = false;
 let timeInertiaBaseDate = null; // Data di riferimento per il ricalcolo (null = usa "now")
+let timeInertiaFilterDays = null; // Filtro giorni: mostra solo aloni con età <= questo valore (null = mostra tutti)
 
 /**
  * Verifica se uno status è escluso dalla funzionalità Time Inertia
@@ -3423,6 +3498,15 @@ function updateTimeInertiaHalos(nodeSelection, changelogMap) {
     
     // Calcola i giorni dall'ultimo cambio di status
     const days = calculateDaysFromLastStatusChange(raw, d.status);
+    
+    // Filtro: mostra l'alone solo se l'età del nodo (Y) è <= all'età del pallino (X)
+    // Se timeInertiaFilterDays è null, mostra tutti gli aloni
+    if (timeInertiaFilterDays !== null && days > timeInertiaFilterDays) {
+      // Rimuovi l'alone se non passa il filtro
+      g.selectAll('circle.time-inertia-halo').remove();
+      return;
+    }
+    
     const color = getTimeInertiaColor(days);
     
     // Determina il raggio dell'alone (più grande del nodo)
@@ -3471,6 +3555,161 @@ function removeTimeInertiaHalos(nodeSelection) {
         });
     }
   });
+}
+
+/**
+ * Calcola il numero massimo di giorni (Dmax) tra tutti i nodi del grafico
+ * @param {d3.Selection} nodeSelection - Selezione D3 dei nodi
+ * @returns {number} - Numero massimo di giorni, o 0 se non disponibile
+ */
+function calculateMaxDays(nodeSelection) {
+  if (!nodeSelection || !nodeSelection.size()) return 0;
+  
+  let maxDays = 0;
+  nodeSelection.each(function(d) {
+    // Salta i nodi con status esclusi
+    if (isExcludedStatus(d.status)) return;
+    
+    // Ottieni il changelog dalla cache
+    const raw = window.__EJ_CHANGELOG_CACHE__[d.key];
+    if (!raw) return;
+    
+    // Calcola i giorni dall'ultimo cambio di status
+    const days = calculateDaysFromLastStatusChange(raw, d.status);
+    if (days !== null && days > maxDays) {
+      maxDays = days;
+    }
+  });
+  
+  return maxDays;
+}
+
+/**
+ * Funzione per aggiornare la posizione della linea orizzontale Time Inertia
+ * (globale per accesso da altri contesti)
+ */
+window.updateTimeInertiaLinePosition = function() {
+  const line = document.getElementById('ej-time-inertia-horizontal-line');
+  const btn = document.getElementById('ej-time-inertia-btn');
+  const handle = document.getElementById('ej-time-inertia-horizontal-line-handle');
+  const assigneePanel = document.getElementById('assigneePanel');
+  
+  if (!line || !btn) return;
+  
+  // Calcola Dmax dai nodi del grafico
+  const nodeSelection = currentGraphState.nodeSelection;
+  const dMax = calculateMaxDays(nodeSelection);
+  
+  // Salva Dmax come attributo della linea per uso successivo
+  line.dataset.dmax = dMax.toString();
+  
+  const btnRect = btn.getBoundingClientRect();
+  const panelRect = assigneePanel ? assigneePanel.getBoundingClientRect() : null;
+  
+  // Calcola la posizione Y (centro verticale del pulsante)
+  const y = btnRect.top + btnRect.height / 2;
+  
+  // Calcola la posizione X di inizio (a qualche pixel a destra del pulsante)
+  const startX = btnRect.right + 10; // 10 pixel di distanza
+  
+  // Calcola la posizione X di fine (a qualche pixel a sinistra del pannello destro)
+  let endX;
+  if (panelRect) {
+    endX = panelRect.left - 10; // 10 pixel di distanza
+  } else {
+    // Fallback: usa la larghezza della finestra meno un margine
+    endX = window.innerWidth - 250; // 250px per il pannello + margine
+  }
+  
+  // Imposta la posizione e le dimensioni della linea
+  line.style.top = `${y}px`;
+  line.style.left = `${startX}px`;
+  line.style.width = `${endX - startX}px`;
+  
+  // Posiziona il pallino al centro della linea se non è già stato posizionato manualmente
+  if (handle && !handle.dataset.manuallyPositioned) {
+    const centerX = startX + (endX - startX) / 2;
+    handle.style.top = `${y}px`;
+    handle.style.left = `${centerX}px`;
+    // Salva la posizione relativa (0.5 = centro)
+    handle.dataset.relativePosition = '0.5';
+    // Calcola e salva anche daysAgo (metà di Dmax)
+    const dMax = parseFloat(line.dataset.dmax) || 0;
+    const daysAgo = Math.round(dMax * 0.5);
+    handle.dataset.daysAgo = daysAgo.toString();
+    // Inizializza il filtro con questo valore
+    timeInertiaFilterDays = daysAgo;
+  } else if (handle && handle.dataset.manuallyPositioned) {
+    // Mantieni la posizione Y sincronizzata con la linea
+    handle.style.top = `${y}px`;
+    // Ricalcola la posizione relativa in base alla nuova dimensione
+    const lineRect = line.getBoundingClientRect();
+    const currentX = parseFloat(handle.style.left) || lineRect.left + lineRect.width / 2;
+    const relativePos = (currentX - lineRect.left) / lineRect.width;
+    handle.dataset.relativePosition = relativePos.toString();
+    // Ricalcola anche daysAgo
+    const dMax = parseFloat(line.dataset.dmax) || 0;
+    const daysAgo = Math.round(dMax * (1 - relativePos));
+    handle.dataset.daysAgo = daysAgo.toString();
+    // Aggiorna il filtro
+    timeInertiaFilterDays = daysAgo;
+  }
+};
+
+/**
+ * Ricalcola la posizione del pallino in base alla nuova dimensione della linea dopo lo zoom
+ * Mantiene lo stesso valore "X days ago" indipendentemente dallo zoom
+ */
+function recalculateHandlePositionAfterZoom() {
+  const line = document.getElementById('ej-time-inertia-horizontal-line');
+  const handle = document.getElementById('ej-time-inertia-horizontal-line-handle');
+  const label = document.getElementById('ej-time-inertia-line-label');
+  
+  if (!line || !handle || !line.classList.contains('visible')) return;
+  
+  // Recupera il valore "days ago" salvato (priorità su posizione relativa)
+  const savedDaysAgo = parseFloat(handle.dataset.daysAgo);
+  
+  // Recupera Dmax dalla linea
+  const dMax = parseFloat(line.dataset.dmax) || 0;
+  
+  let relativePosition;
+  let daysAgo;
+  
+  if (!isNaN(savedDaysAgo) && dMax > 0) {
+    // Usa il valore days ago salvato per ricalcolare la posizione relativa
+    daysAgo = Math.max(0, Math.min(dMax, savedDaysAgo)); // Limita tra 0 e Dmax
+    relativePosition = 1 - (daysAgo / dMax);
+  } else {
+    // Fallback: usa la posizione relativa salvata (per retrocompatibilità)
+    const relativePos = parseFloat(handle.dataset.relativePosition);
+    relativePosition = isNaN(relativePos) ? 0.5 : relativePos;
+    daysAgo = Math.round(dMax * (1 - relativePosition));
+    // Salva anche daysAgo per le prossime volte
+    handle.dataset.daysAgo = daysAgo.toString();
+  }
+  
+  // Ottieni le nuove dimensioni della linea
+  const lineRect = line.getBoundingClientRect();
+  const minX = lineRect.left;
+  const currentLineWidth = lineRect.width;
+  
+  // Calcola la nuova posizione assoluta in base alla posizione relativa ricalcolata
+  const newX = minX + (relativePosition * currentLineWidth);
+  
+  // Aggiorna la posizione del pallino
+  handle.style.left = `${newX}px`;
+  handle.style.top = `${lineRect.top + lineRect.height / 2}px`;
+  
+  // Aggiorna l'etichetta se visibile
+  if (label && label.classList.contains('visible')) {
+    label.textContent = `${daysAgo} days ago`;
+    label.style.left = `${newX}px`;
+    label.style.top = `${lineRect.top - 8}px`;
+  }
+  
+  // Salva la nuova posizione relativa calcolata
+  handle.dataset.relativePosition = relativePosition.toString();
 }
 
 /**
@@ -5029,7 +5268,7 @@ ${exp}
         }
       }, 10000);
       
-    } else {
+        } else {
       // Comportamento normale: mostra menu contestuale
       showNodeContextMenu(
         event,
@@ -5452,7 +5691,7 @@ function buildCompositeFields(raw, kind = 'bug') {
     let summaryText = '';
     if (raw?.renderedFields?.summary) {
       summaryText = _fieldToText(raw.renderedFields.summary);
-    } else {
+        } else {
       summaryText = _fieldToText(fields.summary);
     }
     if (summaryText) {
@@ -5634,7 +5873,7 @@ async function fetchSingleDescription(token, key) {
       await loadGraph(epicSelect.value);
       logBootStep('BOOT_LOAD_GRAPH_OK', { epicKey: epicSelect.value });
       bootProgress.update('Completato', 100);
-    } else {
+  } else {
       setStatus('Select Epics in Actual Sprint', true);
       bootProgress.update('In attesa di selezione…', 80);
     }
@@ -5747,10 +5986,10 @@ async function fetchSingleDescription(token, key) {
       setStatus('Diagnostica copiata negli appunti.', true);
     } catch (e) {
       console.error('Clipboard error', e);
-      setStatus('Impossibile copiare negli appunti.', false);
-    }
-  });
-
+        setStatus('Impossibile copiare negli appunti.', false);
+      }
+    });
+    
   // Pulsante "Specs" accanto a "Copia diagnostica"
   if (copyBtn?.parentElement) {
     let specsBtn = document.getElementById('specsDebug');
@@ -5846,8 +6085,8 @@ async function fetchSingleDescription(token, key) {
     const noneBtn = document.getElementById('assigneeSelectNone');
     if (!panel || !list) {
       logBootStep('BUILD_ASSIGNEES_EARLY_RETURN', { reason: 'Panel o list non trovati', hasPanel: !!panel, hasList: !!list });
-      return;
-    }
+          return;
+        }
     const assignees = currentGraphState.assignees || [];
     logBootStep('BUILD_ASSIGNEES_START', { assigneesCount: assignees.length, assignees: assignees.map(a => ({ id: a.id, label: a.label })) });
 
@@ -5978,7 +6217,7 @@ async function fetchSingleDescription(token, key) {
       checkbox.addEventListener('change', () => {
         if (checkbox.checked) {
           activeTypeFilters.add(item.id);
-        } else {
+    } else {
           activeTypeFilters.delete(item.id);
         }
         applyStatusFilters();
@@ -6054,6 +6293,7 @@ async function loadNoEpicCards(token) {
   window.__EJ_CHANGELOG_CACHE__ = {};
   timeInertiaActive = false;
   timeInertiaHover = false;
+  timeInertiaFilterDays = null; // Resetta il filtro
   
   // Carica data di ricalcolo Time Inertia dallo storage per NO_EPIC
   const storageKey = `timeInertiaBaseDate_${NO_EPIC_OPTION}`;
@@ -6061,21 +6301,10 @@ async function loadNoEpicCards(token) {
     const result = await chrome.storage.sync.get(storageKey);
     if (result[storageKey]) {
       timeInertiaBaseDate = new Date(result[storageKey]);
-      const day = String(timeInertiaBaseDate.getDate()).padStart(2, '0');
-      const month = String(timeInertiaBaseDate.getMonth() + 1).padStart(2, '0');
-      const year = timeInertiaBaseDate.getFullYear();
-      const recalcText = document.getElementById('ej-time-inertia-recalc-text');
-      if (recalcText) {
-        recalcText.textContent = `Dias re-calculados a partir do dia ${day}/${month}/${year}`;
-      }
     } else {
       timeInertiaBaseDate = null;
-      const recalcText = document.getElementById('ej-time-inertia-recalc-text');
-      if (recalcText) {
-        recalcText.textContent = '';
-      }
     }
-  } catch (err) {
+        } catch (err) {
     console.warn('Errore caricamento data Time Inertia:', err);
     timeInertiaBaseDate = null;
   }
@@ -6265,7 +6494,7 @@ function parseChecklistText(text) {
         description: description.trim(),
         fullText: trimmed
       });
-    } else {
+  } else {
       // Se non matcha il formato completo, prova a cercare almeno la key
       const keyMatch = trimmed.match(/([A-Z]+-\d+)/);
       if (keyMatch) {
@@ -6864,8 +7093,8 @@ async function fetchChecklistFromHerokuapp(issueKey, progressBar = null) {
           let prefetchedItems;
           try {
             prefetchedItems = JSON.parse(jsonStr);
-          } catch (e) {
-            debugInfo.error = `Errore nel parsing JSON: ${e.message}`;
+    } catch (e) {
+      debugInfo.error = `Errore nel parsing JSON: ${e.message}`;
             if (progressBar) {
               progressBar.log(`Errore parsing JSON: ${e.message}`, 'error');
             }
@@ -6877,11 +7106,11 @@ async function fetchChecklistFromHerokuapp(issueKey, progressBar = null) {
                 console.warn('Errore chiusura tab:', e);
               }
             }
-            return { items: null, debugInfo };
-          }
-          
-          if (!Array.isArray(prefetchedItems)) {
-            debugInfo.error = 'prefetchedItems non è un array';
+      return { items: null, debugInfo };
+    }
+    
+    if (!Array.isArray(prefetchedItems)) {
+      debugInfo.error = 'prefetchedItems non è un array';
             if (progressBar) {
               progressBar.log('prefetchedItems non è un array', 'error');
             }
