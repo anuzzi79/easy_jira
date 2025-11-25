@@ -91,6 +91,8 @@ let windowDragState = null;
 let hoveredStatusKey = null;
 let hoveredAssigneeKey = null;
 let hoveredTypeKey = null;
+let hoveredNodeId = null; // Track node being hovered (for opacity effect)
+let isDraggingNode = false; // Track if we're currently dragging a node
 const currentGraphState = {
   nodeSelection: null,
   labelSelection: null,
@@ -494,6 +496,12 @@ function recomputeCurtainStatuses() {
 }
 
 function applyStatusCurtainOpacity() {
+  // Se c'è un hover attivo, applica l'opacità hover (che include anche curtain)
+  if (hoveredNodeId) {
+    applyNodeHoverOpacity();
+    return;
+  }
+  
   const nodeSel = currentGraphState.nodeSelection;
   const labelSel = currentGraphState.labelSelection;
   const linkSel = currentGraphState.linkSelection;
@@ -559,6 +567,105 @@ function updateHoverHighlights() {
       ring.lower();
     }
   });
+}
+
+/**
+ * Trova tutti i nodi connessi a un dato nodo (tramite link)
+ * @param {string} nodeId - ID del nodo
+ * @returns {Set<string>} Set di ID dei nodi connessi (incluso il nodo stesso)
+ */
+function findConnectedNodes(nodeId) {
+  const connectedSet = new Set([nodeId]);
+  const linkSel = currentGraphState.linkSelection;
+  if (!linkSel) return connectedSet;
+
+  // Prima passata: trova tutti i nodi direttamente connessi
+  linkSel.each(function(d) {
+    const sourceId = typeof d.source === 'object' ? d.source.id : d.source;
+    const targetId = typeof d.target === 'object' ? d.target.id : d.target;
+    
+    if (sourceId === nodeId) {
+      connectedSet.add(targetId);
+    } else if (targetId === nodeId) {
+      connectedSet.add(sourceId);
+    }
+  });
+
+  return connectedSet;
+}
+
+/**
+ * Applica l'effetto hover: opacità piena per nodo hovered e connessi, 40% per gli altri
+ */
+function applyNodeHoverOpacity() {
+  if (!hoveredNodeId) {
+    clearNodeHoverOpacity();
+    return;
+  }
+
+  const connectedSet = findConnectedNodes(hoveredNodeId);
+  const nodeSel = currentGraphState.nodeSelection;
+  const labelSel = currentGraphState.labelSelection;
+  const linkSel = currentGraphState.linkSelection;
+
+  if (!nodeSel || !labelSel || !linkSel) return;
+
+  // Applica opacità ai nodi
+  nodeSel.style('opacity', d => {
+    // Se il nodo non è visibile per altri motivi, mantieni opacità 0
+    if (!statusIsAllowed(d.status) || !assigneeIsAllowed(d.assigneeId || d.assignee) || !typeIsAllowed(d.issuetype)) return 0;
+    // Se il nodo è in curtain, usa opacità curtain
+    if (curtainStatusSet.has(normalizeStatusName(d.status))) return 0.15;
+    // Se è connesso o è il nodo hovered, opacità piena
+    if (connectedSet.has(d.id)) return 1;
+    // Altrimenti 10%
+    return 0.1;
+  });
+
+  // Applica opacità alle label
+  labelSel.style('opacity', d => {
+    if (!statusIsAllowed(d.status) || !assigneeIsAllowed(d.assigneeId || d.assignee) || !typeIsAllowed(d.issuetype)) return 0;
+    if (curtainStatusSet.has(normalizeStatusName(d.status))) return 0.15;
+    if (connectedSet.has(d.id)) return 1;
+    return 0.1;
+  });
+
+  // Applica opacità ai link
+  linkSel.style('opacity', d => {
+    const sourceId = typeof d.source === 'object' ? d.source.id : d.source;
+    const targetId = typeof d.target === 'object' ? d.target.id : d.target;
+    const sourceNode = currentGraphState.nodesByKey.get(sourceId);
+    const targetNode = currentGraphState.nodesByKey.get(targetId);
+    
+    const sourceStatus = sourceNode?.status;
+    const targetStatus = targetNode?.status;
+    if (!sourceStatus || !targetStatus) return 1;
+    if (!statusIsAllowed(sourceStatus) || !statusIsAllowed(targetStatus)) return 0;
+    if (!assigneeIsAllowed(sourceNode?.assigneeId || sourceNode?.assignee) || !assigneeIsAllowed(targetNode?.assigneeId || targetNode?.assignee)) return 0;
+    if (!typeIsAllowed(sourceNode?.issuetype) || !typeIsAllowed(targetNode?.issuetype)) return 0;
+    
+    const inCurtain = curtainStatusSet.has(normalizeStatusName(sourceStatus)) &&
+      curtainStatusSet.has(normalizeStatusName(targetStatus));
+    if (inCurtain) return 0.15;
+    
+    // Se entrambi i nodi sono connessi, link visibile
+    if (connectedSet.has(sourceId) && connectedSet.has(targetId)) {
+      const sid = sourceId;
+      const tid = targetId;
+      if (sid === CURRENT_EPIC_KEY || tid === CURRENT_EPIC_KEY) return 0.1;
+      return 0.8;
+    }
+    
+    // Altrimenti link sbiadito
+    return 0.1;
+  });
+}
+
+/**
+ * Rimuove l'effetto hover e ripristina l'opacità normale
+ */
+function clearNodeHoverOpacity() {
+  applyStatusCurtainOpacity();
 }
 
 function setHoveredStatus(statusKey) {
@@ -997,6 +1104,11 @@ function applyStatusFilters() {
   }
   recomputeCurtainStatuses();
   applyStatusCurtainOpacity();
+  
+  // Se la modalità Users è attiva, aggiorna gli avatar dopo il filtro
+  if (usersModeActive && typeof updateUsersAvatars === 'function') {
+    setTimeout(() => updateUsersAvatars(), 50);
+  }
 }
 
 function bindStatusFilterEvents() {
@@ -2423,6 +2535,33 @@ function ensureContextUi() {
       .ej-time-inertia-line-label.visible {
         display: block;
       }
+      .ej-users-btn { 
+        position: absolute; 
+        bottom: 20px; 
+        left: 50%;
+        transform: translateX(-50%);
+        width: 60px; 
+        height: 60px; 
+        border-radius: 50%; 
+        border: none; 
+        cursor: pointer; 
+        font-size: 11px; 
+        font-weight: 600; 
+        color: white; 
+        text-align: center; 
+        line-height: 1.2; 
+        z-index: 10004; 
+        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
+        background-color: #3b82f6; /* Blu fisso quando non attivo */
+      }
+      .ej-users-btn:hover { 
+        transform: scale(1.1); 
+        box-shadow: 0 6px 16px rgba(0,0,0,0.4);
+      }
+      .ej-users-btn.active {
+        background-color: #10b981; /* Verde quando attivo */
+      }
     `;
     document.head.appendChild(style);
   }
@@ -2702,6 +2841,82 @@ function ensureContextUi() {
     timeInertiaBtn.className = 'ej-time-inertia-btn';
     timeInertiaBtn.innerHTML = 'Time<br>Inertia';
     document.body.appendChild(timeInertiaBtn);
+  }
+  
+  // Bottone Users
+  let usersBtn = document.getElementById('ej-users-btn');
+  if (!usersBtn) {
+    const assigneePanel = document.getElementById('assigneePanel');
+    if (assigneePanel) {
+      usersBtn = document.createElement('button');
+      usersBtn.id = 'ej-users-btn';
+      usersBtn.className = 'ej-users-btn';
+      usersBtn.innerHTML = 'Users';
+      // Aggiungi il pulsante dentro il pannello users
+      assigneePanel.appendChild(usersBtn);
+      
+      // Event handler per il pulsante Users
+      if (!usersBtn.dataset.handlersAdded) {
+        usersBtn.dataset.handlersAdded = '1';
+        let fadeOutTimeout = null;
+        
+        // mouseenter: mostra gli avatar temporaneamente
+        usersBtn.addEventListener('mouseenter', () => {
+          // Cancella eventuale fade-out in corso
+          if (fadeOutTimeout) {
+            clearTimeout(fadeOutTimeout);
+            fadeOutTimeout = null;
+          }
+          
+          // Se la modalità non è già attiva, mostra gli avatar temporaneamente
+          if (!usersModeActive) {
+            updateUsersAvatars();
+          } else {
+            // Se già attiva, aggiorna gli avatar (potrebbero essere cambiati i nodi)
+            updateUsersAvatars();
+          }
+        });
+        
+        // mouseleave: se non è stato fatto click, rimuovi gli avatar
+        usersBtn.addEventListener('mouseleave', () => {
+          // Se la modalità non è persistente (click), avvia rimozione
+          if (!usersModeActive) {
+            const nodeSelection = currentGraphState.nodeSelection;
+            if (nodeSelection && nodeSelection.size()) {
+              // Avvia rimozione dopo un piccolo delay per evitare flickering
+              fadeOutTimeout = setTimeout(() => {
+                removeUsersAvatars();
+                fadeOutTimeout = null;
+              }, 100);
+            }
+          }
+        });
+        
+        // click: toggle modalità persistente
+        usersBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          
+          // Cancella eventuale fade-out
+          if (fadeOutTimeout) {
+            clearTimeout(fadeOutTimeout);
+            fadeOutTimeout = null;
+          }
+          
+          // Toggle modalità
+          usersModeActive = !usersModeActive;
+          
+          if (usersModeActive) {
+            usersBtn.classList.add('active');
+            updateUsersAvatars();
+            setStatus('Modalità Users attivata', true);
+          } else {
+            usersBtn.classList.remove('active');
+            removeUsersAvatars();
+            setStatus('Modalità Users disattivata', true);
+          }
+        });
+      }
+    }
   }
   
   // Event handlers per Time Inertia (solo se non già aggiunti)
@@ -3370,6 +3585,15 @@ let timeInertiaHover = false;
 let timeInertiaBaseDate = null; // Data di riferimento per il ricalcolo (null = usa "now")
 let timeInertiaFilterDays = null; // Filtro giorni: mostra solo aloni con età <= questo valore (null = mostra tutti)
 
+// Variabile globale per lo stato Modalità Users
+let usersModeActive = false;
+
+// Inizializza la cache per l'animazione degli avatar
+if (!window.usersAvatarAnimationRunning) {
+  window.usersAvatarAnimationRunning = false;
+  window.usersAvatarAnimationFrame = null;
+}
+
 /**
  * Verifica se uno status è escluso dalla funzionalità Time Inertia
  * @param {string} status - Status da verificare
@@ -3555,6 +3779,180 @@ function removeTimeInertiaHalos(nodeSelection) {
         });
     }
   });
+}
+
+/**
+ * Funzione per aggiornare/aggiungere i pallini utente accanto ai nodi
+ */
+function updateUsersAvatars() {
+  const nodeSel = currentGraphState.nodeSelection;
+  if (!nodeSel) return;
+  
+  const epicKey = CURRENT_EPIC_KEY || currentGraphState.epicKey;
+  
+  nodeSel.each(function(d) {
+    const g = d3.select(this);
+    
+    // Rimuovi eventuali avatar esistenti
+    g.selectAll('.ej-user-avatar').remove();
+    
+    // Se il nodo ha un assignee, aggiungi il pallino
+    if (d.assigneeId && d.assigneeId !== ASSIGNEE_UNASSIGNED) {
+      const R = d.id === epicKey ? 10 : 7;
+      // avatarSize è il RAGGIO del pallino, calcolato come R * 0.85
+      const avatarSize = R * 0.85;
+      // Raggio di rotazione: leggermente più grande del nodo
+      const orbitRadius = R + avatarSize + 2;
+      
+      // Inizializza l'angolo di rotazione se non esiste (casuale per ogni nodo)
+      if (d.userAvatarAngle === undefined) {
+        d.userAvatarAngle = Math.random() * Math.PI * 2;
+      }
+      
+      // Calcola la posizione iniziale in base all'angolo
+      const offsetX = Math.cos(d.userAvatarAngle) * orbitRadius;
+      const offsetY = Math.sin(d.userAvatarAngle) * orbitRadius;
+      
+      const avatarGroup = g.append('g')
+        .attr('class', 'ej-user-avatar')
+        .attr('transform', `translate(${offsetX}, ${offsetY})`);
+      
+      // Salva il raggio di orbita nei dati per l'animazione
+      avatarGroup.datum({ orbitRadius, nodeId: d.id });
+      
+      // Cerchio di sfondo (stile Jira)
+      avatarGroup.append('circle')
+        .attr('r', avatarSize)
+        .attr('fill', '#e2e8f0')
+        .attr('stroke', '#fff')
+        .attr('stroke-width', 1.5);
+      
+      // Avatar: immagine o iniziali
+      if (d.assigneeAvatar) {
+        // Crea un defs se non esiste
+        let defs = svg.select('defs');
+        if (defs.empty()) {
+          defs = svg.append('defs');
+        }
+        
+        const clipId = `avatar-clip-${String(d.assigneeId).replace(/[^a-zA-Z0-9]/g, '-')}`;
+        
+        // Rimuovi eventuali clipPath esistenti con lo stesso ID
+        defs.select(`#${clipId}`).remove();
+        
+        defs.append('clipPath')
+          .attr('id', clipId)
+          .append('circle')
+          .attr('r', avatarSize);
+        
+        avatarGroup.append('image')
+          .attr('href', d.assigneeAvatar)
+          .attr('x', -avatarSize)
+          .attr('y', -avatarSize)
+          .attr('width', avatarSize * 2)
+          .attr('height', avatarSize * 2)
+          .attr('clip-path', `url(#${clipId})`);
+      } else {
+        // Mostra iniziali
+        const initials = window.getInitials ? window.getInitials(d.assignee) : '?';
+        avatarGroup.append('text')
+          .attr('text-anchor', 'middle')
+          .attr('dy', '0.35em')
+          .attr('font-size', avatarSize * 0.4)
+          .attr('font-weight', '600')
+          .attr('fill', '#475569')
+          .text(initials);
+      }
+    }
+  });
+  
+  // Avvia l'animazione di rotazione se non è già attiva
+  if (usersModeActive && !window.usersAvatarAnimationRunning) {
+    startUsersAvatarAnimation();
+  }
+}
+
+/**
+ * Funzione per rimuovere i pallini utente
+ */
+function removeUsersAvatars() {
+  const nodeSel = currentGraphState.nodeSelection;
+  if (!nodeSel) return;
+  
+  nodeSel.each(function() {
+    d3.select(this).selectAll('.ej-user-avatar').remove();
+  });
+  
+  // Ferma l'animazione
+  if (window.usersAvatarAnimationRunning) {
+    stopUsersAvatarAnimation();
+  }
+}
+
+/**
+ * Avvia l'animazione di rotazione degli avatar utente
+ */
+function startUsersAvatarAnimation() {
+  if (window.usersAvatarAnimationRunning) return;
+  
+  window.usersAvatarAnimationRunning = true;
+  let lastTime = performance.now();
+  const rotationSpeed = 0.5; // Velocità di rotazione in radianti al secondo
+  
+  function animate(currentTime) {
+    if (!window.usersAvatarAnimationRunning || !usersModeActive) {
+      stopUsersAvatarAnimation();
+      return;
+    }
+    
+    const deltaTime = (currentTime - lastTime) / 1000; // Converti in secondi
+    lastTime = currentTime;
+    
+    const nodeSel = currentGraphState.nodeSelection;
+    if (nodeSel) {
+      nodeSel.each(function(d) {
+        // Aggiorna l'angolo solo se il nodo ha un avatar
+        const g = d3.select(this);
+        const avatarGroup = g.select('.ej-user-avatar');
+        
+        if (!avatarGroup.empty() && d.userAvatarAngle !== undefined) {
+          // Incrementa l'angolo
+          d.userAvatarAngle += rotationSpeed * deltaTime;
+          // Mantieni l'angolo tra 0 e 2π
+          d.userAvatarAngle = d.userAvatarAngle % (Math.PI * 2);
+          
+          // Recupera il raggio di orbita salvato
+          const avatarData = avatarGroup.datum();
+          const epicKey = CURRENT_EPIC_KEY || currentGraphState.epicKey;
+          const R = d.id === epicKey ? 10 : 7;
+          const avatarSize = R * 0.85;
+          const orbitRadius = avatarData?.orbitRadius || (R + avatarSize + 2);
+          
+          // Calcola la nuova posizione
+          const offsetX = Math.cos(d.userAvatarAngle) * orbitRadius;
+          const offsetY = Math.sin(d.userAvatarAngle) * orbitRadius;
+          
+          // Aggiorna la trasformazione
+          avatarGroup.attr('transform', `translate(${offsetX}, ${offsetY})`);
+        }
+      });
+    }
+    
+    window.usersAvatarAnimationFrame = requestAnimationFrame(animate);
+  }
+  
+  window.usersAvatarAnimationFrame = requestAnimationFrame(animate);
+}
+
+/**
+ * Ferma l'animazione di rotazione degli avatar utente
+ */
+function stopUsersAvatarAnimation() {
+  window.usersAvatarAnimationRunning = false;
+  if (window.usersAvatarAnimationFrame) {
+    cancelAnimationFrame(window.usersAvatarAnimationFrame);
+    window.usersAvatarAnimationFrame = null;
+  }
 }
 
 /**
@@ -5070,6 +5468,11 @@ ${exp}
         .attr('fill', '#ffffff');
     }
   });
+  
+  // Se la modalità Users è attiva, aggiungi gli avatar
+  if (usersModeActive) {
+    updateUsersAvatars();
+  }
 
   // Click destro: mostra menu contestuale (inspect / search) o attiva laccio se ALT premuto
   node.on('contextmenu', (event, d) => {
@@ -5325,6 +5728,15 @@ ${exp}
       }
     }, 100);
   }
+  
+  // Se la modalità Users è attiva, riattivala dopo il ridisegno
+  if (usersModeActive && node && node.size() > 0) {
+    setTimeout(() => {
+      if (usersModeActive && currentGraphState.nodeSelection) {
+        updateUsersAvatars();
+      }
+    }, 100);
+  }
   currentGraphState.nodes = nodes;
   currentGraphState.links = links;
   const nodesMap = new Map();
@@ -5340,15 +5752,29 @@ ${exp}
     .style('opacity', 0);
 
   node.on('mouseover', (event, d) => {
+    // Non mostrare tooltip se stiamo trascinando
+    if (isDraggingNode) return;
+    
     const statusTxt = d.status ? `Status: ${escapeHtml(d.status)}` : '';
     const assigneeTxt = d.assignee ? `Assignee: ${escapeHtml(d.assignee)}` : '';
     const extra = [statusTxt, assigneeTxt].filter(Boolean).join('<br>');
     tooltip.style('opacity', 1)
       .html(`<strong>${d.key}</strong><br>${escapeHtml(d.summary)}<br><em>${escapeHtml(d.issuetype)}</em>${extra ? `<br>${extra}` : ''}`);
+    
+    // Attiva effetto hover: mostra solo nodi connessi
+    hoveredNodeId = d.id;
+    applyNodeHoverOpacity();
   }).on('mousemove', (event) => {
+    // Non aggiornare posizione tooltip se stiamo trascinando
+    if (isDraggingNode) return;
     tooltip.style('left', `${event.pageX + 8}px`).style('top', `${event.pageY - 10}px`);
-  }).on('mouseout', () => {
-    tooltip.style('opacity', 0);
+  }).on('mouseout', (event, d) => {
+    // Non rimuovere hover se stiamo trascinando questo nodo
+    if (!isDraggingNode) {
+      tooltip.style('opacity', 0);
+      hoveredNodeId = null;
+      clearNodeHoverOpacity();
+    }
   }).on('click', (event, d) => {
     window.open(`${JIRA_BASE}/browse/${d.key}`, '_blank');
   });
@@ -5483,13 +5909,33 @@ function makeDrag(sim) {
   function dragstarted(event, d) {
     if (!event.active) sim.alphaTarget(0.3).restart();
     d.fx = d.x; d.fy = d.y;
+    // Nascondi il tooltip quando inizia il drag e mantienilo nascosto
+    isDraggingNode = true;
+    if (tooltip) tooltip.style('opacity', 0);
+    // Mantieni l'effetto hover durante il drag
+    if (!hoveredNodeId) {
+      hoveredNodeId = d.id;
+      applyNodeHoverOpacity();
+    }
   }
   function dragged(event, d) {
     d.fx = event.x; d.fy = event.y;
+    // Assicurati che il tooltip rimanga nascosto durante tutto il drag
+    if (tooltip) tooltip.style('opacity', 0);
+    // Assicurati che l'effetto hover sia mantenuto durante il drag
+    if (hoveredNodeId !== d.id) {
+      hoveredNodeId = d.id;
+      applyNodeHoverOpacity();
+    }
   }
   function dragended(event, d) {
     if (!event.active) sim.alphaTarget(0);
     d.fx = null; d.fy = null;
+    isDraggingNode = false;
+    // Mantieni tooltip nascosto - si riattiverà solo con un nuovo mouseover
+    if (tooltip) tooltip.style('opacity', 0);
+    // L'effetto hover viene mantenuto se il mouse è ancora sopra il nodo
+    // Se il mouse è uscito, mouseout lo gestirà automaticamente
   }
   return d3.drag()
     .filter(ev => !ev.altKey)
