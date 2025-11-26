@@ -502,6 +502,12 @@ function applyStatusCurtainOpacity() {
     return;
   }
   
+  // Se c'è una ricerca attiva, riapplica l'opacità della ricerca
+  if (searchQuery && searchedNodeIds.size > 0) {
+    highlightSearchResults(searchQuery);
+    return;
+  }
+  
   const nodeSel = currentGraphState.nodeSelection;
   const labelSel = currentGraphState.labelSelection;
   const linkSel = currentGraphState.linkSelection;
@@ -566,6 +572,113 @@ function updateHoverHighlights() {
     if (!ring.empty()) {
       ring.lower();
     }
+  });
+}
+
+// Variabile globale per la ricerca
+let searchQuery = '';
+let searchedNodeIds = new Set();
+
+/**
+ * Costruisce il testo completo della label di un nodo (come nel tooltip)
+ */
+function buildNodeLabelText(node) {
+  const parts = [
+    node.key || '',
+    node.summary || '',
+    node.issuetype || '',
+    node.status || '',
+    node.assignee || ''
+  ];
+  return parts.filter(Boolean).join(' ').toLowerCase();
+}
+
+/**
+ * Evidenzia i nodi che corrispondono alla query di ricerca
+ */
+function highlightSearchResults(query) {
+  searchQuery = query.trim().toLowerCase();
+  searchedNodeIds.clear();
+  
+  const nodeSel = currentGraphState.nodeSelection;
+  const labelSel = currentGraphState.labelSelection;
+  const linkSel = currentGraphState.linkSelection;
+  
+  if (!nodeSel || !labelSel || !linkSel) return;
+  
+  // Se la query è vuota, rimuovi tutti gli highlight
+  if (!searchQuery) {
+    nodeSel.each(function(d) {
+      const g = d3.select(this);
+      g.selectAll('circle.search-highlight-ring').remove();
+    });
+    applyStatusCurtainOpacity();
+    return;
+  }
+  
+  // Trova i nodi che corrispondono alla query
+  nodeSel.each(function(d) {
+    const labelText = buildNodeLabelText(d);
+    if (labelText.includes(searchQuery)) {
+      searchedNodeIds.add(d.id);
+    }
+  });
+  
+  // Evidenzia i nodi trovati
+  nodeSel.each(function(d) {
+    const g = d3.select(this);
+    const ringSel = g.selectAll('circle.search-highlight-ring');
+    
+    if (searchedNodeIds.has(d.id)) {
+      const baseRadius = d.id === CURRENT_EPIC_KEY ? 10 : 7;
+      const highlightRadius = baseRadius * 2.5;
+      
+      ringSel.data([d])
+        .join(enter => enter.append('circle').attr('class', 'search-highlight-ring'))
+        .attr('r', highlightRadius)
+        .attr('fill', 'rgba(34, 197, 94, 0.5)')
+        .attr('stroke', 'rgba(34, 197, 94, 0.8)')
+        .attr('stroke-width', 2);
+      
+      const ring = g.select('circle.search-highlight-ring');
+      if (!ring.empty()) {
+        ring.lower();
+      }
+    } else {
+      ringSel.remove();
+    }
+  });
+  
+  // Applica opacità: evidenzia i nodi trovati, sbiadisce gli altri
+  nodeSel.style('opacity', d => {
+    if (!statusIsAllowed(d.status) || !assigneeIsAllowed(d.assigneeId || d.assignee) || !typeIsAllowed(d.issuetype)) return 0;
+    if (curtainStatusSet.has(normalizeStatusName(d.status))) return 0.15;
+    return searchedNodeIds.has(d.id) ? 1 : 0.2;
+  });
+  
+  labelSel.style('opacity', d => {
+    if (!statusIsAllowed(d.status) || !assigneeIsAllowed(d.assigneeId || d.assignee) || !typeIsAllowed(d.issuetype)) return 0;
+    if (curtainStatusSet.has(normalizeStatusName(d.status))) return 0.15;
+    return searchedNodeIds.has(d.id) ? 1 : 0.2;
+  });
+  
+  linkSel.style('opacity', d => {
+    const sourceId = typeof d.source === 'object' ? d.source.id : d.source;
+    const targetId = typeof d.target === 'object' ? d.target.id : d.target;
+    const sourceNode = currentGraphState.nodesByKey.get(sourceId);
+    const targetNode = currentGraphState.nodesByKey.get(targetId);
+    
+    if (!sourceNode || !targetNode) return 0.2;
+    if (!statusIsAllowed(sourceNode.status) || !statusIsAllowed(targetNode.status)) return 0;
+    if (!assigneeIsAllowed(sourceNode.assigneeId || sourceNode.assignee) || !assigneeIsAllowed(targetNode.assigneeId || targetNode.assignee)) return 0;
+    if (!typeIsAllowed(sourceNode.issuetype) || !typeIsAllowed(targetNode.issuetype)) return 0;
+    
+    const inCurtain = curtainStatusSet.has(normalizeStatusName(sourceNode.status)) &&
+      curtainStatusSet.has(normalizeStatusName(targetNode.status));
+    if (inCurtain) return 0.15;
+    
+    const bothMatch = searchedNodeIds.has(sourceId) && searchedNodeIds.has(targetId);
+    return bothMatch ? 0.8 : 0.1;
   });
 }
 
@@ -6414,6 +6527,52 @@ async function fetchSingleDescription(token, key) {
   const copyBtn = document.getElementById('copyDebug');
   const openSettingsBtn = document.getElementById('openSettings');
   openSettingsBtn?.addEventListener('click', () => chrome.runtime.openOptionsPage());
+  
+  // Event listener per la barra di ricerca
+  const searchInput = document.getElementById('nodeSearchInput');
+  const searchClearBtn = document.getElementById('searchClearBtn');
+  
+  function updateClearButtonVisibility() {
+    if (searchClearBtn && searchInput) {
+      if (searchInput.value.trim()) {
+        searchClearBtn.classList.add('visible');
+      } else {
+        searchClearBtn.classList.remove('visible');
+      }
+    }
+  }
+  
+  if (searchInput) {
+    searchInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        const query = searchInput.value;
+        highlightSearchResults(query);
+      }
+    });
+    
+    // Mostra/nascondi il pulsante di cancellazione
+    searchInput.addEventListener('input', (event) => {
+      updateClearButtonVisibility();
+      if (!event.target.value.trim()) {
+        highlightSearchResults('');
+      }
+    });
+    
+    // Mostra il pulsante all'inizializzazione se c'è già del testo
+    updateClearButtonVisibility();
+  }
+  
+  if (searchClearBtn) {
+    searchClearBtn.addEventListener('click', () => {
+      if (searchInput) {
+        searchInput.value = '';
+        searchClearBtn.classList.remove('visible');
+        highlightSearchResults('');
+      }
+    });
+  }
+  
   copyBtn?.addEventListener('click', async () => {
     const debug = {
       lastApiCall: lastApiDebug || { info: 'Nessuna chiamata ancora effettuata.' },
