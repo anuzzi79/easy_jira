@@ -510,6 +510,7 @@ function applyStatusCurtainOpacity() {
   
   const nodeSel = currentGraphState.nodeSelection;
   const labelSel = currentGraphState.labelSelection;
+  const summarySel = currentGraphState.summarySelection;
   const linkSel = currentGraphState.linkSelection;
   if (!nodeSel || !labelSel || !linkSel) return;
   nodeSel.style('opacity', d => {
@@ -520,6 +521,12 @@ function applyStatusCurtainOpacity() {
     if (!statusIsAllowed(d.status) || !assigneeIsAllowed(d.assigneeId || d.assignee) || !typeIsAllowed(d.issuetype)) return 0;
     return curtainStatusSet.has(normalizeStatusName(d.status)) ? 0.15 : 1;
   });
+  if (summarySel) {
+    summarySel.style('opacity', d => {
+      if (!statusIsAllowed(d.status) || !assigneeIsAllowed(d.assigneeId || d.assignee) || !typeIsAllowed(d.issuetype)) return 0;
+      return curtainStatusSet.has(normalizeStatusName(d.status)) ? 0.15 : 1;
+    });
+  }
   linkSel.style('opacity', d => {
     const sourceNode = typeof d.source === 'object' ? currentGraphState.nodesByKey.get(d.source.id) : currentGraphState.nodesByKey.get(d.source);
     const targetNode = typeof d.target === 'object' ? currentGraphState.nodesByKey.get(d.target.id) : currentGraphState.nodesByKey.get(d.target);
@@ -661,6 +668,15 @@ function highlightSearchResults(query) {
     if (curtainStatusSet.has(normalizeStatusName(d.status))) return 0.15;
     return searchedNodeIds.has(d.id) ? 1 : 0.2;
   });
+  
+  const summarySel = currentGraphState.summarySelection;
+  if (summarySel) {
+    summarySel.style('opacity', d => {
+      if (!statusIsAllowed(d.status) || !assigneeIsAllowed(d.assigneeId || d.assignee) || !typeIsAllowed(d.issuetype)) return 0;
+      if (curtainStatusSet.has(normalizeStatusName(d.status))) return 0.15;
+      return searchedNodeIds.has(d.id) ? 1 : 0.2;
+    });
+  }
   
   linkSel.style('opacity', d => {
     const sourceId = typeof d.source === 'object' ? d.source.id : d.source;
@@ -5810,8 +5826,69 @@ ${exp}
       .attr('dy', 0)
       .attr('pointer-events', 'none');
 
+  // Funzione per wrappare il testo in base alla larghezza
+  function wrapText(text, width, fontSize) {
+    const words = text.split(/\s+/);
+    const lines = [];
+    let currentLine = '';
+    
+    words.forEach(word => {
+      const testLine = currentLine ? `${currentLine} ${word}` : word;
+      // Stima approssimativa della larghezza del testo (fontSize * 0.6 è un'approssimazione)
+      const testWidth = testLine.length * fontSize * 0.6;
+      if (testWidth > width && currentLine) {
+        lines.push(currentLine);
+        currentLine = word;
+      } else {
+        currentLine = testLine;
+      }
+    });
+    if (currentLine) {
+      lines.push(currentLine);
+    }
+    return lines;
+  }
+
+  // Crea i titoli (summary) sotto i nodi
+  const summaryGroup = stage.append('g')
+    .attr('class', 'node-summaries')
+    .selectAll('g')
+    .data(nodes)
+    .join('g')
+      .attr('class', 'node-summary')
+      .attr('pointer-events', 'none');
+
+  summaryGroup.each(function(d) {
+    const g = d3.select(this);
+    const summaryText = d.summary || '';
+    if (!summaryText) return;
+    
+    // Calcola la larghezza basata sulla lunghezza del codice (approssimativamente)
+    const codeWidth = (d.key || '').length * 11 * 0.6; // font-size 11 * 0.6 per carattere
+    const textWidth = codeWidth;
+    const fontSize = Math.round(11 / 3); // 1/3 dell'altezza del codice (font-size 11)
+    
+    // Wrappa il testo
+    const lines = wrapText(summaryText, textWidth, fontSize);
+    
+    // Crea un elemento text con tspan per ogni riga
+    const textEl = g.append('text')
+      .attr('text-anchor', 'middle')
+      .attr('font-size', fontSize)
+      .attr('fill', '#666')
+      .attr('dy', 0);
+    
+    lines.forEach((line, i) => {
+      textEl.append('tspan')
+        .text(line)
+        .attr('x', 0)
+        .attr('dy', i === 0 ? 0 : fontSize * 1.2);
+    });
+  });
+
   currentGraphState.nodeSelection = node;
   currentGraphState.labelSelection = label;
+  currentGraphState.summarySelection = summaryGroup;
   currentGraphState.linkSelection = link;
   currentGraphState.aiLayer = aiLayer;
   
@@ -5904,6 +5981,16 @@ ${exp}
 
     node.attr('transform', d => `translate(${d.x},${d.y})`);
     label.attr('x', d => d.x).attr('y', d => d.y - (d.id === epicKey ? 10 : 7));
+    
+    // Aggiorna posizione dei summary sotto i nodi
+    const summarySel = currentGraphState.summarySelection;
+    if (summarySel) {
+      summarySel.attr('transform', d => {
+        const nodeRadius = d.id === epicKey ? 10 : 7;
+        const offsetY = nodeRadius + 2; // 2px di spazio tra nodo e summary
+        return `translate(${d.x}, ${d.y + offsetY})`;
+      });
+    }
   });
 
   window.addEventListener('resize', () => {
